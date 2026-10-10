@@ -119,8 +119,13 @@ uci commit dhcp && /etc/init.d/dnsmasq restart
 To also check that tokens can be obtained through meta servers, delete the stored VPN token first: `uci delete pia_wg.@vpntoken[0]; uci commit pia_wg`.
 <br/> Remove these entries (`uci del_list ...` with the same values) when done.
 
+## Temporary files and locking
+Temporary files (the API responses, which hold tokens, the logging pipe and downloads) are created in `/var/run/pia/`, in RAM, with mode 0700; the directory is created on demand (`/tmp/pia` is used if `/var/run` is not writable). Leftovers of runs that died are removed at the next run. The only temporary files elsewhere are the short-lived `*.tmp` files used to replace cache files atomically, which sit next to them in the cache directory.
+
+The commands that act on the tunnel, the tokens or the cache (`start`, `restart`, `stop`, `init-network`, `cache refresh`, `cache probe`) take a lock, `/var/run/pia/pia_wg.lock`, so that two runs cannot step on each other. The watchdog's `start` just skips when another run is in progress (it runs again a minute later); the other commands wait up to 2 minutes and then give up with exit status 75. A lock left by a run that died is removed, and a run still holding it after 15 minutes is considered stuck and terminated. `configure` does not take the lock, so that waiting at a prompt cannot stop the watchdog.
+
 ## Logging
-When the watchdog is enabled, the scripts log is located in `/var/log/pia_wg_watchdog.log`
+When the watchdog is enabled, the scripts log is located in `/var/log/pia/pia_wg_watchdog.log` (RAM on OpenWrt, so it does not wear the flash; use `./pia_wg.sh log path` to choose another directory)
 The log can be displayed using `pia_wg.sh log show` and cleared using `pia_wg_sh log clear`
 
 ## Usage

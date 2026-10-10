@@ -16,7 +16,11 @@
 
 SCRIPTDL="https://raw.githubusercontent.com/bolemo/pia_wg/main/pia_wg.sh"
 SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
-LOGDEFPATH='/var/log'
+RUNDIR='/var/run/pia' # temporary files (RAM); created on demand, mode 0700
+LOCKDIR="$RUNDIR/pia_wg.lock"
+LOCK_WAIT=120  # seconds a manual command waits for another run
+LOCK_STEAL=900 # seconds after which a run still holding the lock is considered stuck
+LOGDEFPATH='/var/log/pia'
 LOGNAME='pia_wg_watchdog.log'
 PIACONF='/etc/config/pia_wg'
 PIAWG_IF="$(uci -q get pia_wg.@iface[0].name)" || PIAWG_IF='wg_pia'
@@ -26,12 +30,105 @@ esac
 [ ${#PIAWG_IF} -le 15 ] || PIAWG_IF='wg_pia'
 PIAWG_PEER='wgpeer_pia'
 CACHEDEFDIR='/mnt/usb/pia_wg' # external storage, to spare the router flash
-CACHERAMDIR='/tmp/pia_wg'     # used when the external storage is not mounted
+CACHERAMDIR="$RUNDIR/cache"   # used when the external storage is not mounted
 SERVERLIST_URL='https://serverlist.piaservers.net/vpninfo/servers/v6'
 META_MAX=6           # verified meta servers to keep in the cache
 META_PROBES=40       # max meta servers to probe per refresh
 LEGACY_MAXAGE=604800 # age (s) after which the legacy-token regions are probed again
 CURVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$SCRIPTPATH")"
+
+# Create the run directory (falls back to /tmp/pia when /var/run is not
+# writable), and remove the leftovers of runs that died: <kind>.<pid>.<ext>
+rundir_init() {
+  (umask 077 && mkdir -p "$RUNDIR") 2>/dev/null
+  if [ ! -d "$RUNDIR" ] || [ ! -w "$RUNDIR" ]; then
+    RUNDIR='/tmp/pia'
+    (umask 077 && mkdir -p "$RUNDIR")
+  fi
+  chmod 700 "$RUNDIR" 2>/dev/null
+  LOCKDIR="$RUNDIR/pia_wg.lock"
+  CACHERAMDIR="$RUNDIR/cache"
+  for RF in "$RUNDIR"/*.fifo "$RUNDIR"/*.resp "$RUNDIR"/*.tmp; do
+    [ -e "$RF" ] || continue
+    RP="${RF##*/}"
+    RP="${RP#*.}"
+    RP="${RP%%.*}"
+    case "$RP" in
+    '' | *[!0-9]*) continue ;;
+    esac
+    pid_is_pia "$RP" || rm -f "$RF"
+  done
+}
+
+# Is this pid a live pia_wg.sh run (and not a reused pid)?
+pid_is_pia() {
+  kill -0 "$1" 2>/dev/null && grep -q pia_wg "/proc/$1/cmdline" 2>/dev/null
+}
+
+# lock_take <command...>: serialise the runs that act on the tunnel and tokens.
+# The watchdog 'start' skips when busy (it runs again in a minute); the other
+# commands wait up to $LOCK_WAIT seconds, then give up (exit 75). A lock whose
+# run died is removed; one held for more than $LOCK_STEAL seconds is stuck.
+lock_take() {
+  LW=0
+  LNP=0
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    LPID="$(cat "$LOCKDIR/pid" 2>/dev/null)"
+    LSINCE="$(cat "$LOCKDIR/since" 2>/dev/null)"
+    LCMD="$(cat "$LOCKDIR/cmd" 2>/dev/null)"
+    if [ -z "$LPID" ]; then
+      # being created by another run, or its creator died on the way
+      LNP=$((LNP + 1))
+      if [ $LNP -gt 5 ]; then
+        mv "$LOCKDIR" "$LOCKDIR.old.$$" 2>/dev/null && rm -rf "$LOCKDIR.old.$$"
+        LNP=0
+      fi
+    elif ! pid_is_pia "$LPID"; then
+      [ "$(cat "$LOCKDIR/pid" 2>/dev/null)" = "$LPID" ] &&
+        mv "$LOCKDIR" "$LOCKDIR.old.$$" 2>/dev/null && rm -rf "$LOCKDIR.old.$$"
+      continue
+    elif [ $(($(date +%s) - ${LSINCE:-0})) -gt "$LOCK_STEAL" ]; then
+      echo "Run $LPID ($LCMD) is stuck for more than $((LOCK_STEAL / 60)) minutes; terminating it" >&3
+      kill "$LPID" 2>/dev/null
+      sleep 2
+      kill -9 "$LPID" 2>/dev/null
+      mv "$LOCKDIR" "$LOCKDIR.old.$$" 2>/dev/null && rm -rf "$LOCKDIR.old.$$"
+      continue
+    else
+      if [ "$1" = 'start' ]; then
+        echo "Another pia_wg.sh run is in progress (pid $LPID: $LCMD); skipping" >&3
+        exit 0
+      fi
+      if [ $LW -ge "$LOCK_WAIT" ]; then
+        echo "Another pia_wg.sh run (pid $LPID: $LCMD) is still in progress after ${LOCK_WAIT}s; giving up" >&3
+        exit 75
+      fi
+      [ $LW -eq 0 ] && echo "Waiting for another pia_wg.sh run (pid $LPID: $LCMD)…" >&3
+    fi
+    LW=$((LW + 1))
+    sleep 1
+  done
+  echo "$$" >"$LOCKDIR/pid"
+  date +%s >"$LOCKDIR/since"
+  echo "$*" >"$LOCKDIR/cmd"
+  PIALOCK=1
+}
+
+# Remove what this run created (the lock only if it holds it)
+# shellcheck disable=SC2329  # Function is used in trap below
+cleanup() {
+  [ -z "$BGPID" ] || kill "$BGPID" 2>/dev/null
+  # files being written to replace cache files atomically
+  [ -z "$PROBETMP" ] || rm -f "$PROBETMP"
+  [ -z "$METATMP" ] || rm -f "$METATMP"
+  [ -z "$LISTTMP" ] || rm -f "$LISTTMP"
+  [ -z "$PIARESP" ] || rm -f "$PIARESP"
+  [ -z "$FIFO" ] || {
+    exec 3>&-
+    rm -f "$FIFO"
+  }
+  [ -z "$PIALOCK" ] || rm -rf "$LOCKDIR"
+}
 
 # read_yn <question> [y|n]: ask a yes/no question; enter (or end of input)
 # gives the default, shown in capitals; no default means asking until answered
@@ -187,7 +284,8 @@ meta_refresh() {
   CA="$(pia_ca)"
   N=0
   P=0
-  : >"$CD/meta.list.tmp"
+  METATMP="$CD/meta.list.tmp"
+  : >"$METATMP"
   while read -r IP CN; do
     [ "$IP" ] || continue
     [ $P -ge $META_PROBES ] && break
@@ -220,6 +318,7 @@ cache_refresh_list() {
   CD="$(cache_dir)"
   CA="$(pia_ca)"
   TMP="$CD/servers.json.tmp"
+  LISTTMP="$TMP"
   : >"$TMP"
   LISTVIA=''
   while read -r IP CN; do
@@ -379,48 +478,64 @@ legacy_probe() {
   CA="$(pia_ca)"
   LU="$(uci -q get pia_wg.@vpntoken[0].user)"
   LP="$(uci -q get pia_wg.@vpntoken[0].pass)"
-  echo "# $(date +%s)" >"$CD/legacy.list.tmp"
-  jq -r '.regions[] | select(.offline == false) | select((.servers.wg // []) | length > 0)
+  PROBETMP="$CD/legacy.list.tmp"
+  echo "# $(date +%s)" >"$PROBETMP"
+  # Run in the background and wait for it, so that a signal is handled at once
+  # (a trap only runs after the foreground command ends); the loop stops by
+  # itself when this run is gone
+  MAINPID=$$
+  {
+    jq -r '.regions[] | select(.offline == false) | select((.servers.wg // []) | length > 0)
     | "\(.id) " + (.servers.wg | map("\(.ip),\(.cn)") | join(" "))' "$CD/servers.json" |
-    while read -r RID SRVS; do
-      REF=0
-      TRY=0
-      for SRV in $SRVS; do
-        # Some servers answer differently from one request to the next: a
-        # server counts as refusing only if it refuses twice in a row
-        VERDICT=''
-        for _ in 1 2; do
-          CODE="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 4 --max-time 8 -G \
-            ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "${SRV#*,}::${SRV%%,*}:1337" --user "$LU:$LP" \
-            --data-urlencode "pubkey=probe" "https://${SRV#*,}:1337/addKey")"
-          case "$CODE" in
-          200 | 409)
-            VERDICT='ok'
+      while read -r RID SRVS; do
+        kill -0 "$MAINPID" 2>/dev/null || exit 1
+        REF=0
+        TRY=0
+        for SRV in $SRVS; do
+          # Some servers answer differently from one request to the next: a
+          # server counts as refusing only if it refuses twice in a row
+          VERDICT=''
+          for _ in 1 2; do
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 4 --max-time 8 -G \
+              ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "${SRV#*,}::${SRV%%,*}:1337" --user "$LU:$LP" \
+              --data-urlencode "pubkey=probe" "https://${SRV#*,}:1337/addKey")"
+            case "$CODE" in
+            200 | 409)
+              VERDICT='ok'
+              break
+              ;;
+            401) VERDICT='refused' ;;
+            *)
+              VERDICT=''
+              break
+              ;;
+            esac
+          done
+          case "$VERDICT" in
+          ok)
+            REF=0
+            TRY=1
             break
             ;;
-          401) VERDICT='refused' ;;
-          *)
-            VERDICT=''
-            break
+          refused)
+            REF=$((REF + 1))
+            TRY=$((TRY + 1))
             ;;
           esac
         done
-        case "$VERDICT" in
-        ok)
-          REF=0
-          TRY=1
-          break
-          ;;
-        refused)
-          REF=$((REF + 1))
-          TRY=$((TRY + 1))
-          ;;
-        esac
+        [ $TRY -gt 0 ] && [ $REF -eq $TRY ] && echo "$RID" >>"$CD/legacy.list.tmp"
+        printf '.' >&3
       done
-      [ $TRY -gt 0 ] && [ $REF -eq $TRY ] && echo "$RID" >>"$CD/legacy.list.tmp"
-      printf '.' >&3
-    done
+  } &
+  BGPID=$!
+  wait "$BGPID"
+  WRC=$?
+  BGPID=''
   echo >&3
+  if [ $WRC -ne 0 ]; then
+    rm -f "$CD/legacy.list.tmp"
+    return 1
+  fi
   mv "$CD/legacy.list.tmp" "$CD/legacy.list"
 }
 
@@ -538,7 +653,10 @@ EOI
 
 # Private (mode 0600) file receiving PIA API responses; removed on exit
 piaresp_init() {
-  [ -n "$PIARESP" ] || PIARESP="$(mktemp /tmp/pia_wg_api.XXXXXX)"
+  if [ -z "$PIARESP" ]; then
+    PIARESP="$RUNDIR/api.$$.resp"
+    : >"$PIARESP"
+  fi
 }
 
 # pia_api <meta path> <subdomain> <domain path> [curl args…]
@@ -1166,7 +1284,7 @@ log_clear() {
 }
 
 script_update() {
-  TMPDL="/tmp/pia_wg_dl.tmp"
+  TMPDL="$RUNDIR/update.$$.tmp"
   curl -s -o "$TMPDL" "$SCRIPTDL" || {
     echo "Failed to check/download latest version!" >&2
     rm "$TMPDL"
@@ -1240,27 +1358,29 @@ print_usage() {
 [ -e "$PIACONF" ] || touch "$PIACONF"
 PIALOG="$(logfile)"
 [ -t 0 ] && unset AUTO || AUTO=1
+rundir_init
+trap cleanup EXIT
+trap 'exit 1' 1 2 3 6 15
 
 # Logging (only if not in interactive mode)
 if [ "$AUTO" ]; then
-  FIFO="$(mktemp -u /tmp/pia_wg.XXXXXXXXXX)"
+  FIFO="$RUNDIR/log.$$.fifo"
   export FIFO
-  # shellcheck disable=SC2329  # Function is used in trap below
-  _exit() {
-    exec 3>&-
-    rm "$FIFO" >/dev/null 2>&1
-    [ -z "$PIARESP" ] || rm -f "$PIARESP"
-    exit
-  }
-  trap "_exit" 1 2 3 6 EXIT
   [ -f "$PIALOG" ] && touch "$PIALOG" || echo "[$(date)] Log created" >"$PIALOG"
   mkfifo "$FIFO"
   awk -v lf="$PIALOG" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf}' "$FIFO" >&2 &
   exec 3<>"$FIFO"
 else
   exec 3>&2
-  trap '[ -z "$PIARESP" ] || rm -f "$PIARESP"' EXIT
 fi
+
+# Serialise the runs that act on the tunnel, the tokens or the cache
+case "$1" in
+'start' | 'restart' | 'stop' | 'init-network') lock_take "$1" ;;
+'cache') case "$2" in
+  'refresh' | 'probe') lock_take "$1 $2" ;;
+  esac ;;
+esac
 
 case "$1" in
 'configure') case "$2" in
