@@ -859,6 +859,12 @@ start_wgpia() {
   echo "Starting PIA ($(uci get network.$PIAWG_PEER.description))" >&3
   ifup "$PIAWG_IF"
   sleep 1
+  # The handshake can take a few seconds; check quietly before reporting
+  N=0
+  while [ $N -lt 5 ] && ! check_wg >/dev/null 2>&1 3>/dev/null; do
+    N=$((N + 1))
+    sleep 2
+  done
   check_wg
   RET=$?
   [ $RET -eq 0 ] && echo "PIA started successfully ..." >&3 || echo "Could not start PIA!" >&3
@@ -884,7 +890,9 @@ check_wg() {
   fi
 
   echo "Region is: $(uci get network.$PIAWG_PEER.description)"
-  if traceroute -i "$PIAWG_IF" -q1 -m1 1.1.1.1 | grep -q ' ms'; then
+  # The first hop does not always answer TTL expiry, so also try a plain ping
+  if traceroute -i "$PIAWG_IF" -q1 -m1 1.1.1.1 | grep -q ' ms' ||
+    ping -q -c1 -n -W 3 -I "$PIAWG_IF" 1.1.1.1 >/dev/null 2>&1; then
     echo "Connectivity through PIA: OK"
   elif ping -q -c1 -n -I "$WAN_IF" "$PIAWG_EP" >/dev/null; then
     echo "Connectivity through PIA: NOK" >&3
