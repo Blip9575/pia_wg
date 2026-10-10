@@ -1223,10 +1223,48 @@ $(uci export pia_wg | awk '
 EOI
 }
 
+# The endpoint must never be routed through the tunnel itself: its encrypted
+# packets would be fed back into the tunnel in a loop that saturates the CPU
+# and takes the connection down. netifd does not always add a host route for
+# it (not with a default route into the tunnel), so the script makes sure
+# there is one, through the best default route that is not the tunnel.
+#   endpoint_route <ip> pin    : install it
+#   endpoint_route <ip> check  : install it only if the endpoint goes through
+#                                the tunnel; fails if it still does
+endpoint_route() {
+  [ -n "$1" ] || return 0
+  if [ "$2" = 'check' ]; then
+    ERD="$(ip route get "$1" 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+    [ "$ERD" = "$PIAWG_IF" ] || return 0
+  fi
+  ERL="$(ip -4 route show default | awk -v t="$PIAWG_IF" '
+    {
+      dev = ""; gw = ""; m = 0
+      for (i = 1; i <= NF; i++) {
+        if ($i == "dev") dev = $(i + 1)
+        if ($i == "via") gw = $(i + 1)
+        if ($i == "metric") m = $(i + 1)
+      }
+      if (dev != "" && dev != t) print m, (gw == "" ? "-" : gw), dev
+    }' | sort -n | head -n 1)"
+  [ -n "$ERL" ] || return 1
+  # shellcheck disable=SC2086  # three words: metric, gateway or -, device
+  set -- "$1" $ERL
+  if [ "$3" = '-' ]; then
+    ip route replace "$1/32" dev "$4" 2>/dev/null
+  else
+    ip route replace "$1/32" via "$3" dev "$4" 2>/dev/null
+  fi
+  ERD="$(ip route get "$1" 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+  [ "$ERD" != "$PIAWG_IF" ]
+}
+
 start_wgpia() {
   stop_wgpia
   set_netconf
   echo "Starting PIA ($(uci get network.$PIAWG_PEER.description))" >&3
+  # Before the tunnel exists, so that there is no moment without it
+  endpoint_route "$(uci -q get network.$PIAWG_PEER.endpoint_host)" pin
   ifup "$PIAWG_IF"
   sleep 1
   # The handshake can take a few seconds; check quietly before reporting
@@ -1245,6 +1283,9 @@ stop_wgpia() {
   DESC=" ($(uci -q get network.$PIAWG_PEER.description))" || DESC=""
   echo "Stopping PIA$DESC" >&3
   ifdown "$PIAWG_IF" >/dev/null 2>&1
+  # the host route pinned by endpoint_route
+  SEP="$(uci -q get network.$PIAWG_PEER.endpoint_host)" && [ -n "$SEP" ] && ip route del "$SEP/32" 2>/dev/null
+  return 0
 }
 
 check_wg() {
@@ -1252,6 +1293,12 @@ check_wg() {
     PIAWG_EP="$(wg show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit;}')"
     PIAWG_MK="$(wg show "$PIAWG_IF" fwmark)"
     [ "$PIAWG_MK" = "off" ] && PIAWG_MK=''
+    # never leave the endpoint routed through the tunnel (routing loop)
+    if ! endpoint_route "$PIAWG_EP" check; then
+      echo "Routing loop: the endpoint $PIAWG_EP is routed through the tunnel; bringing it down!" >&3
+      ifdown "$PIAWG_IF" >/dev/null 2>&1
+      return 1
+    fi
     WAN_IF="$(ip route get "$PIAWG_EP" ${PIAWG_MK:+mark "$PIAWG_MK"} | awk '{for(i=0;i<NF;i++){if($i=="dev"){print $++i; exit;}}}')"
     echo "WireGuard PIA interface: UP"
   else
