@@ -97,7 +97,16 @@ Some PIA WireGuard servers refuse the long lived VPN token and only accept the l
 
 The first time (and when the result is older than a week), `configure region` offers to check the regions; this takes a few minutes. It can also be run with `./pia_wg.sh cache probe`. The check calls `addKey` with a deliberately invalid public key, so no key is registered on the servers, and leaves through the WAN, because PIA does not accept it from inside its own tunnel. Some servers answer differently from one request to the next; a region is marked only if its servers refuse every time. The result is a snapshot, kept with its date in `legacy.list` in the cache directory. When the configured region is in that list, connecting goes straight to the legacy token instead of first trying the VPN token and being refused.
 
-When the VPN is up the router's own traffic goes through it, so the cron job keeps the cache and tokens fresh even where PIA is blocked. Before travelling to such a place, configure and start the VPN, and run `./pia_wg.sh cache refresh` while PIA is reachable so that the cache and tokens are fresh.
+All the script's calls to PIA leave through the WAN device used to reach the tunnel endpoint, not through the tunnel, so the cache and tokens can be refreshed whether the PIA tunnel is up, down or not passing traffic, and without disconnecting it. `cache refresh` shows what it did (and the cron job writes the same lines to the log):
+```
+Cache update (leaving via br-wan; PIA tunnel unchanged)
+  Servers list : 204 regions (updated, via losangeles414)
+  Meta servers : 6 verified (unchanged)
+  Tokens       : API token valid for 94 days, VPN token for 93 days
+Done in 4s
+```
+
+Before travelling to a place where PIA is blocked, configure and start the VPN, then run `./pia_wg.sh cache refresh` (and `cache probe`) while PIA is reachable, so that the cache and the tokens are fresh.
 
 To simulate DNS based blocking before travelling, make dnsmasq answer `0.0.0.0` for the PIA domains, then stop and start the VPN:
 ```

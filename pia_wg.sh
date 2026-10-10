@@ -83,6 +83,25 @@ logfile() {
   fi
 }
 
+# Device PIA servers are reached through: the WAN used for the tunnel endpoint.
+# PIA calls leave through it (curl --interface if!dev), so they work whether
+# the PIA tunnel is up, down or dead, and addKey is accepted (PIA does not take
+# it from inside its own tunnel). Empty when no tunnel is up: the default route
+# is then the WAN anyway. Sets $WANDEV.
+pia_wan() {
+  [ -z "$WANDEV_SET" ] || return 0
+  WANDEV_SET=1
+  WANDEV=''
+  wg show "$PIAWG_IF" >/dev/null 2>&1 || return 0
+  WEP="$(wg show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit}')"
+  [ -n "$WEP" ] || return 0
+  WMK="$(wg show "$PIAWG_IF" fwmark)"
+  [ "$WMK" = 'off' ] && WMK=''
+  WANDEV="$(ip route get "$WEP" ${WMK:+mark "$WMK"} 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+  [ "$WANDEV" = "$PIAWG_IF" ] && WANDEV=''
+  return 0
+}
+
 cache_dir() {
   CACHEDIR="$(uci -q get pia_wg.@cache[0].dir)" || CACHEDIR="$CACHEDEFDIR"
   if [ ! -d "$CACHEDIR" ]; then
@@ -163,6 +182,7 @@ meta_candidates() {
 
 # Keep the meta servers whose certificate validates against the PIA CA
 meta_refresh() {
+  pia_wan
   CD="$(cache_dir)"
   CA="$(pia_ca)"
   N=0
@@ -172,54 +192,110 @@ meta_refresh() {
     [ "$IP" ] || continue
     [ $P -ge $META_PROBES ] && break
     P=$((P + 1))
-    curl -s -o /dev/null --max-time 5 --cacert "$CA" --connect-to "$CN::$IP:443" "https://$CN/" || continue
+    curl -s -o /dev/null --max-time 5 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$IP:443" "https://$CN/" || continue
     echo "$IP $CN" >>"$CD/meta.list.tmp"
     N=$((N + 1))
     [ $N -ge $META_MAX ] && break
   done <<EOM
 $(meta_candidates)
 EOM
+  METAN=$N
   if [ $N -eq 0 ]; then
     rm -f "$CD/meta.list.tmp"
-    echo "No verified PIA meta server reachable; keeping cached ones" >&3
+    METARES='failed'
     return 1
   fi
-  cmp -s "$CD/meta.list.tmp" "$CD/meta.list" && rm "$CD/meta.list.tmp" || mv "$CD/meta.list.tmp" "$CD/meta.list"
-  echo "Verified PIA meta servers cached: $N"
+  if cmp -s "$CD/meta.list.tmp" "$CD/meta.list"; then
+    rm "$CD/meta.list.tmp"
+    METARES='unchanged'
+  else
+    mv "$CD/meta.list.tmp" "$CD/meta.list"
+    METARES='updated'
+  fi
 }
 
 # Fetch the servers list through verified meta servers (by IP), then the public hostname
 cache_refresh_list() {
+  pia_wan
   CD="$(cache_dir)"
   CA="$(pia_ca)"
   TMP="$CD/servers.json.tmp"
   : >"$TMP"
+  LISTVIA=''
   while read -r IP CN; do
     [ "$IP" ] || continue
-    curl -sf --max-time 15 --cacert "$CA" --connect-to "$CN::$IP:443" "https://$CN/vpninfo/servers/v6" | head -1 >"$TMP"
-    jq -e '.regions | length > 0' "$TMP" >/dev/null 2>&1 && break
+    curl -sf --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$IP:443" "https://$CN/vpninfo/servers/v6" | head -1 >"$TMP"
+    jq -e '.regions | length > 0' "$TMP" >/dev/null 2>&1 && {
+      LISTVIA="$CN"
+      break
+    }
   done <<EOM
 $(cat "$CD/meta.list" 2>/dev/null)
 EOM
-  jq -e '.regions | length > 0' "$TMP" >/dev/null 2>&1 ||
-    curl -sf --max-time 15 "$SERVERLIST_URL" | head -1 >"$TMP"
+  if [ -z "$LISTVIA" ]; then
+    curl -sf --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} "$SERVERLIST_URL" | head -1 >"$TMP"
+    LISTVIA='serverlist.piaservers.net'
+  fi
   if jq -e '.regions | length > 0' "$TMP" >/dev/null 2>&1; then
-    cmp -s "$TMP" "$CD/servers.json" && rm "$TMP" || mv "$TMP" "$CD/servers.json"
-    echo "PIA servers list cached"
+    LISTN="$(jq '.regions | length' "$TMP")"
+    if cmp -s "$TMP" "$CD/servers.json"; then
+      rm "$TMP"
+      LISTRES='unchanged'
+    else
+      mv "$TMP" "$CD/servers.json"
+      LISTRES='updated'
+    fi
   else
     rm -f "$TMP"
-    echo "Could not fetch PIA servers list; keeping cached one" >&3
+    LISTRES='failed'
     return 1
   fi
 }
 
+# Days of validity left for the token stored in pia_wg.@<section>[0]
+token_days() {
+  TDE="$(uci -q get "pia_wg.@$1[0].expires")"
+  if [ "${TDE:-0}" -gt 0 ]; then
+    echo "$(((TDE - $(date +%s)) / 86400)) days"
+  else
+    echo "an unknown time"
+  fi
+}
+
 cache_refresh() {
-  cache_refresh_list
-  R=$?
-  meta_refresh || R=1
-  # Renew PIA tokens ahead of expiry (through the tunnel when it is up)
+  RSTART="$(date +%s)"
+  R=0
+  pia_wan
+  if [ -n "$WANDEV" ]; then
+    echo "Cache update (leaving via $WANDEV; PIA tunnel unchanged)" >&3
+  else
+    echo "Cache update (no PIA tunnel up; direct)" >&3
+  fi
+  if cache_refresh_list; then
+    echo "  Servers list : $LISTN regions ($LISTRES, via $LISTVIA)" >&3
+  else
+    echo "  Servers list : NOT updated, keeping the cached copy" >&3
+    R=1
+  fi
+  if meta_refresh; then
+    echo "  Meta servers : $METAN verified ($METARES)" >&3
+  else
+    echo "  Meta servers : NONE reachable, keeping the cached ones" >&3
+    R=1
+  fi
+  # Renew PIA tokens ahead of expiry
   if uci -q get pia_wg.@user[0] >/dev/null; then
-    pia_tokens renew || R=1
+    if pia_tokens renew; then
+      echo "  Tokens       : API token valid for $(token_days apitoken), VPN token for $(token_days vpntoken)" >&3
+    else
+      echo "  Tokens       : renewal FAILED" >&3
+      R=1
+    fi
+  fi
+  if [ $R -eq 0 ]; then
+    echo "Done in $(($(date +%s) - RSTART))s" >&3
+  else
+    echo "Done in $(($(date +%s) - RSTART))s, with errors" >&3
   fi
   return $R
 }
@@ -297,15 +373,9 @@ legacy_probe() {
     echo "Cannot get a PIA VPN token; regions not checked" >&3
     return 1
   }
-  # PIA servers do not accept addKey from inside a PIA tunnel: leave through
-  # the WAN device used to reach the tunnel endpoint
-  PIF=''
-  if wg show "$PIAWG_IF" >/dev/null 2>&1; then
-    PEP="$(wg show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit}')"
-    PMK="$(wg show "$PIAWG_IF" fwmark)"
-    [ "$PMK" = 'off' ] && PMK=''
-    PIF="$(ip route get "$PEP" ${PMK:+mark "$PMK"} | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
-  fi
+  # PIA servers do not accept addKey from inside a PIA tunnel
+  pia_wan
+  echo "Checking the regions (leaving via ${WANDEV:-the default route}); this takes a few minutes" >&3
   CA="$(pia_ca)"
   LU="$(uci -q get pia_wg.@vpntoken[0].user)"
   LP="$(uci -q get pia_wg.@vpntoken[0].pass)"
@@ -321,7 +391,7 @@ legacy_probe() {
         VERDICT=''
         for _ in 1 2; do
           CODE="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 4 --max-time 8 -G \
-            ${PIF:+--interface "if!$PIF"} --cacert "$CA" --connect-to "${SRV#*,}::${SRV%%,*}:1337" --user "$LU:$LP" \
+            ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "${SRV#*,}::${SRV%%,*}:1337" --user "$LU:$LP" \
             --data-urlencode "pubkey=probe" "https://${SRV#*,}:1337/addKey")"
           case "$CODE" in
           200 | 409)
@@ -373,7 +443,11 @@ region_names() {
 
 select_region() {
   echo "Fetching latest PIA servers list…"
-  cache_refresh_list || echo "Using cached PIA servers list"
+  if cache_refresh_list; then
+    echo "PIA servers list: $LISTN regions ($LISTRES)"
+  else
+    echo "Could not fetch the PIA servers list; using the cached one" >&3
+  fi
   if ! PIAREGIONS="$(jq -e '.regions | sort_by(.name)' "$(cache_dir)/servers.json" 2>/dev/null)"; then
     echo "Error fetching PIA servers list!" >&3
     exit 1
@@ -438,7 +512,11 @@ select_region() {
     commit pia_wg.@region[0]
 EOI
   echo "Checking PIA meta servers…"
-  meta_refresh
+  if meta_refresh; then
+    echo "Verified PIA meta servers cached: $METAN"
+  else
+    echo "No verified PIA meta server reachable; keeping cached ones" >&3
+  fi
 }
 
 set_piauser() {
@@ -475,6 +553,7 @@ pia_api() {
   DPATH="$3"
   shift 3
   piaresp_init
+  pia_wan
   CA="$(pia_ca)"
   CD="$(cache_dir)"
   EPS="$(awk '{print $1, $2, "pin"}' "$CD/meta.list" 2>/dev/null)"
@@ -486,9 +565,9 @@ privateinternetaccess.com - domain
 piaproxy.net - domain"
   while read -r EP CN MODE; do
     case "$MODE" in
-    'pin') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 --cacert "$CA" --connect-to "$CN::$EP:443" "$@" "https://$CN$MPATH")" ;;
-    'insecure') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 --connect-to "$CN::$EP:443" "$@" "https://$CN$MPATH")" ;;
-    'domain') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 "$@" "https://$SUB.$EP$DPATH")" ;;
+    'pin') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$EP:443" "$@" "https://$CN$MPATH")" ;;
+    'insecure') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --connect-to "$CN::$EP:443" "$@" "https://$CN$MPATH")" ;;
+    'domain') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} "$@" "https://$SUB.$EP$DPATH")" ;;
     *) continue ;;
     esac
     case "$CODE" in
@@ -617,6 +696,7 @@ pia_token_forget() {
 # Response in $PIAADDKEY; $ADDKEYAUTHFAIL is set if a server refused the token.
 pia_addkey() {
   piaresp_init
+  pia_wan
   CA="$(pia_ca)"
   PUB="$(uci -q get pia_wg.@keys[0].pub)"
   if [ "$PIAAUTH" = 'vpn' ]; then
@@ -630,8 +710,8 @@ $(uci -q get pia_wg.@region[0].dns) - dns"
   unset ADDKEYAUTHFAIL
   while read -r HOST CN MODE; do
     case "$MODE" in
-    'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 --cacert "$CA" --connect-to "$CN::$HOST:1337" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:1337/addKey")" ;;
-    'dns') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 -G "$@" --data-urlencode "pubkey=$PUB" "https://$HOST:1337/addKey")" ;;
+    'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$HOST:1337" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:1337/addKey")" ;;
+    'dns') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} -G "$@" --data-urlencode "pubkey=$PUB" "https://$HOST:1337/addKey")" ;;
     *) continue ;;
     esac
     [ "$CODE" = '401' ] && ADDKEYAUTHFAIL=1
@@ -949,7 +1029,8 @@ set_netconf() {
   if [ -z "$DIP_STATUS" ]; then
     pia_addkey_any
   else
-    PIAADDKEY="$(curl -s -k -G --connect-to "$(uci -q get pia_wg.@dip[0].cn)::$(uci -q get pia_wg.@dip[0].ip)" --user "dedicated_ip_$(uci -q get pia_wg.@dip[0].token):$(uci -q get pia_wg.@dip[0].ip)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@dip[0].cn):1337/addKey")"
+    pia_wan
+    PIAADDKEY="$(curl -s -k -G ${WANDEV:+--interface "if!$WANDEV"} --connect-to "$(uci -q get pia_wg.@dip[0].cn)::$(uci -q get pia_wg.@dip[0].ip)" --user "dedicated_ip_$(uci -q get pia_wg.@dip[0].token):$(uci -q get pia_wg.@dip[0].ip)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@dip[0].cn):1337/addKey")"
   fi
   #  echo "$PIAADDKEY"
 
