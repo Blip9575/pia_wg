@@ -33,16 +33,26 @@ META_PROBES=40       # max meta servers to probe per refresh
 LEGACY_MAXAGE=604800 # age (s) after which the legacy-token regions are probed again
 CURVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$SCRIPTPATH")"
 
+# read_yn <question> [y|n]: ask a yes/no question; enter (or end of input)
+# gives the default, shown in capitals; no default means asking until answered
 read_yn() {
-  while
-    printf "%s? (y/n):" "$1"
-    read -r AND
-    echo "$AND" | grep -qvi '^\(y\(es\)\?\|no\?\)$'
-  do :; done
-  case "$AND" in
-  n | N | no | No | nO | NO) return 1 ;;
-  *) return 0 ;;
+  case "$2" in
+  y) HINT='Y/n' ;;
+  n) HINT='y/N' ;;
+  *) HINT='y/n' ;;
   esac
+  while :; do
+    printf "%s? (%s):" "$1" "$HINT"
+    read -r AND || {
+      [ "$2" = 'y' ]
+      return
+    }
+    [ -z "$AND" ] && AND="$2"
+    case "$AND" in
+    [Yy] | [Yy][Ee][Ss]) return 0 ;;
+    [Nn] | [Nn][Oo]) return 1 ;;
+    esac
+  done
 }
 
 set_logpath() {
@@ -259,7 +269,7 @@ set_cache() {
   [ -z "$NEWCACHEDIR" ] || CACHEDIR="$NEWCACHEDIR"
   printf "Extra region IDs to take meta servers from, space separated (press enter for none): "
   read -r CACHEREGIONS
-  read_yn "Allow meta servers whose certificate is not signed by the PIA CA (insecure)" && CACHEINSECURE=1 || CACHEINSECURE=0
+  read_yn "Allow meta servers whose certificate is not signed by the PIA CA (insecure)" n && CACHEINSECURE=1 || CACHEINSECURE=0
   {
     echo "delete pia_wg.@cache[0]"
     echo "add pia_wg cache"
@@ -355,9 +365,9 @@ legacy_stamp() {
 }
 
 # Numbered list of the online WireGuard regions, (L) marking those needing the
-# legacy token. Uses $PIAREGIONS, $PIASERVPF, $PIASERVGEO and $LEGACYIDS.
+# legacy token. Uses $PIAREGIONS, $PIASERVPF, $PIASERVGEO, $PIASERVSO and $LEGACYIDS.
 region_names() {
-  echo "$PIAREGIONS" | jq -r --arg l "$LEGACYIDS" ".[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO |
+  echo "$PIAREGIONS" | jq -r --arg l "$LEGACYIDS" ".[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO $PIASERVSO |
     .id as \$id | .name + (if (\$l | split(\" \") | any(.[]; . == \$id)) then \" (L)\" else \"\" end)" | nl -v0
 }
 
@@ -385,15 +395,23 @@ select_region() {
   if [ -z "$PIAREGIONID" ]; then
     LSTAMP="$(legacy_stamp)"
     if [ -z "$AUTO" ] && { [ -z "$LSTAMP" ] || [ $(($(date +%s) - LSTAMP)) -gt "$LEGACY_MAXAGE" ]; }; then
-      read_yn "Check which regions need the legacy token (takes a few minutes)" && legacy_probe
+      read_yn "Check which regions need the legacy token (takes a few minutes)" y && legacy_probe
       LSTAMP="$(legacy_stamp)"
     fi
     LEGACYIDS="$(legacy_ids)"
     echo "Eliminating offline servers…"
     echo "Eliminating non WireGuard servers…"
-    read_yn "Port forward only servers" && PIASERVPF='| select(.port_forward==true) ' || PIASERVPF=''
-    read_yn "Geo only servers" && PIASERVGEO='| select(.geo==true) ' || PIASERVGEO=''
-    region_names
+    while :; do
+      read_yn "Port forward only servers" n && PIASERVPF='| select(.port_forward==true) ' || PIASERVPF=''
+      read_yn "Geo only servers" n && PIASERVGEO='| select(.geo==true) ' || PIASERVGEO=''
+      # Streaming optimised regions: 'Streaming' in the name or '-so.' in the DNS
+      # name (their ids do not all end in '-so', e.g. uk_2)
+      read_yn "Stream optimised only servers" n && PIASERVSO='| select((.name | contains("Streaming")) or (.dns | contains("-so."))) ' || PIASERVSO=''
+      REGIONNAMES="$(region_names)"
+      [ -n "$REGIONNAMES" ] && break
+      echo "No region matches these filters!"
+    done
+    echo "$REGIONNAMES"
     if [ -n "$LSTAMP" ]; then
       echo "(L) = needs the 24h legacy token (checked $(date -d "@$LSTAMP" 2>/dev/null))"
     fi
@@ -402,7 +420,7 @@ select_region() {
       read -r AND || exit 1
       case "$AND" in
       '' | *[!0-9]*) PIAREGIONID='' ;;
-      *) PIAREGIONID="$(echo "$PIAREGIONS" | jq -r "[.[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO ][$AND].id // empty")" ;;
+      *) PIAREGIONID="$(echo "$PIAREGIONS" | jq -r "[.[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO $PIASERVSO ][$AND].id // empty")" ;;
       esac
       [ -n "$PIAREGIONID" ] && break
       echo "Invalid region number: '$AND'"
@@ -840,7 +858,7 @@ keep_conf_section() {
   if uci -q get "pia_wg.@$1[0]" >/dev/null; then
     echo "A configuration already exists for '$DESC':"
     uci show "pia_wg.@$1[0]" | awk 'sub(/^[^.]*\.[^.]*\./,"")==1{print "  "$0}'
-    read_yn "Keep this configuration"
+    read_yn "Keep this configuration" y
     return $?
   fi
   return 1
@@ -1066,7 +1084,7 @@ script_update() {
     exit
   }
   NEWVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$TMPDL")"
-  read_yn "Version $NEWVERS is available (current: $CURVERS); install" || {
+  read_yn "Version $NEWVERS is available (current: $CURVERS); install" n || {
     rm "$TMPDL"
     exit
   }
@@ -1155,7 +1173,7 @@ case "$1" in
     keep_conf_section 'keys' || generate_wgkeys
     keep_conf_section 'net_interface' || set_defnetiface
     keep_conf_section 'net_peer' || set_defnetpeer
-    if read_yn "Do you have a dedicated IP"; then
+    if read_yn "Do you have a dedicated IP" n; then
       keep_conf_section 'dip' || set_dip
       validate_dip
     else

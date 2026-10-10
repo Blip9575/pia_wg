@@ -58,6 +58,14 @@ uci commit pia_wg.@net_interface[0]
 
 Then, next time you use `./pia_wg.sh start` (if not already started, otherwise you need to restart or do stop then start to enable the new configuration) or `./pia_wg.sh restart`, it will use these extra settings when OpenWrt WireGuard will create the PIA interface and the PIA peer.
 
+## Choosing a region
+`./pia_wg.sh configure region` lets you type a region ID, or pick from a numbered list that can be narrowed with yes/no questions. Pressing enter gives the default, which is shown in capitals, e.g. `(y/N)`:
+  - `Port forward only servers? (y/N)`: only regions supporting port forwarding
+  - `Geo only servers? (y/N)`: only regions with geo-located servers
+  - `Stream optimised only servers? (y/N)`: only the streaming optimised regions (those with "Streaming" in their name; their ids do not all end in `-so`, e.g. `uk_2`)
+
+The answers are combined; if no region matches, the questions are asked again. The same convention applies to the other yes/no questions of the script (for example, answering the "Keep this configuration" question with enter keeps it).
+
 ## Interface name
 The network interface is named `wg_pia` by default. To use another name (letters, digits and underscore, 15 characters at most), run `./pia_wg.sh configure interface`, or set it directly: `uci set pia_wg.@iface[0].name=vpn_pia` (after `uci add pia_wg iface`). Adapt your firewall zone's covered network accordingly. When the name is changed with `configure interface`, the interface created under the previous name is removed.
 
