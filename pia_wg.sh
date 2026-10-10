@@ -1378,8 +1378,14 @@ if [ "$AUTO" ]; then
   export FIFO
   [ -f "$PIALOG" ] && touch "$PIALOG" || echo "[$(date)] Log created" >"$PIALOG"
   mkfifo "$FIFO"
-  awk -v lf="$PIALOG" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf}' "$FIFO" >&2 &
+  # Open both ends before starting the reader, which gets its own read-only
+  # descriptor: a short command may exit (and remove the pipe) before a
+  # reader that opens it by name has started, and the reader must not hold
+  # the write end or it would never see the end of the input.
   exec 3<>"$FIFO"
+  exec 4<"$FIFO"
+  awk -v lf="$PIALOG" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf}' <&4 3>&- 4<&- >&2 &
+  exec 4<&-
 else
   exec 3>&2
 fi
