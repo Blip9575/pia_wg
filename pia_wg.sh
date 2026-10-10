@@ -17,6 +17,9 @@
 
 SCRIPTDL="https://raw.githubusercontent.com/Blip9575/pia_wg/release/pia_wg.sh"
 SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
+SCRIPTNAME="${SCRIPTPATH##*/}"
+CRON_TAG_WD='# pia_wg watchdog' # cron entries are recognised by these tags, not by the file name
+CRON_TAG_CACHE='# pia_wg cache'
 RUNDIR='/var/run/pia' # temporary files (RAM); created on demand, mode 0700
 LOCKDIR="$RUNDIR/pia_wg.lock"
 LOCK_WAIT=120  # seconds a manual command waits for another run
@@ -63,7 +66,8 @@ rundir_init() {
 
 # Is this pid a live pia_wg.sh run (and not a reused pid)?
 pid_is_pia() {
-  kill -0 "$1" 2>/dev/null && grep -q pia_wg "/proc/$1/cmdline" 2>/dev/null
+  kill -0 "$1" 2>/dev/null &&
+    { grep -qF "$SCRIPTNAME" "/proc/$1/cmdline" 2>/dev/null || grep -qF pia_wg "/proc/$1/cmdline" 2>/dev/null; }
 }
 
 # lock_take <command...>: serialise the runs that act on the tunnel and tokens.
@@ -401,21 +405,23 @@ cache_refresh() {
 }
 
 cache_installed() {
-  grep -qF 'pia_wg.sh cache refresh' /etc/crontabs/root 2>/dev/null
+  grep -qF "$CRON_TAG_CACHE" /etc/crontabs/root 2>/dev/null
 }
 
+# (Re)write the entry, so that one pointing at another path (script moved or
+# renamed) is replaced
 cache_install() {
-  cache_installed && return
+  grep -qF "/bin/sh $SCRIPTPATH cache refresh $CRON_TAG_CACHE" /etc/crontabs/root 2>/dev/null && return
   {
-    crontab -l
-    echo "17 */6 * * * /bin/sh $SCRIPTPATH cache refresh # pia_wg cache"
+    crontab -l 2>/dev/null | grep -vF "$CRON_TAG_CACHE"
+    echo "17 */6 * * * /bin/sh $SCRIPTPATH cache refresh $CRON_TAG_CACHE"
   } | crontab -
   echo "[$(date)] Cache refresh installed" >>"$PIALOG"
 }
 
 cache_remove() {
   cache_installed || return
-  crontab -l | grep -vF 'pia_wg.sh cache refresh' | crontab -
+  crontab -l | grep -vF "$CRON_TAG_CACHE" | crontab -
   echo "[$(date)] Cache refresh removed" >>"$PIALOG"
 }
 
@@ -1271,7 +1277,7 @@ check_wg() {
 }
 
 watchdog_installed() {
-  grep -qF 'pia_wg.sh start' /etc/crontabs/root 2>/dev/null
+  grep -qF "$CRON_TAG_WD" /etc/crontabs/root 2>/dev/null
   return $?
 }
 
@@ -1280,17 +1286,17 @@ watchdog_lastrun() {
 }
 
 watchdog_install() {
-  watchdog_installed && return
+  grep -qF "/bin/sh $SCRIPTPATH start $CRON_TAG_WD" /etc/crontabs/root 2>/dev/null && return
   {
-    crontab -l
-    echo "* * * * * /bin/sh $SCRIPTPATH start # pia_wg watchdog"
+    crontab -l 2>/dev/null | grep -vF "$CRON_TAG_WD"
+    echo "* * * * * /bin/sh $SCRIPTPATH start $CRON_TAG_WD"
   } | crontab -
   echo "[$(date)] Watchdog installed" >>"$PIALOG"
 }
 
 watchdog_remove() {
   watchdog_installed || return
-  crontab -l | grep -vF 'pia_wg.sh start' | crontab -
+  crontab -l | grep -vF "$CRON_TAG_WD" | crontab -
   echo "[$(date)] Watchdog removed" >>"$PIALOG"
 }
 
