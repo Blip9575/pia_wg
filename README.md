@@ -2,18 +2,27 @@
 A script to setup and run PIA through WireGuard on OpenWrt
 <br />https://github.com/bolemo/pia_wg/
 
+__This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bolemo/pia_wg/), kept in sync with it, with the changes listed under *Version* below. The changes are also offered upstream, one commit each, in the branch `official-api-offline-cache`.
+
 ## Inspired from:
   - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.0.16
+1.1.0 (upstream 1.0.16)
+
+Changes compared to upstream 1.0.16:
+  - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
+  - Offline cache (servers list, verified meta servers, tokens) kept on external storage and refreshed by cron: `cache refresh|install|remove|show|probe`; all PIA calls leave through the WAN device, so the PIA tunnel is never disconnected for it
+  - `configure region`: regions needing the legacy token are marked `(L)`, a streaming optimised filter, default answers on every yes/no question
+  - Configurable interface name, a run lock, temporary files in `/var/run/pia`, log in `/var/log/pia`
+  - Fixes: server list error check, connectivity check on tunnels whose first hop does not answer, `jq` without regex support, `update` refusing anything that is not a valid script
 
 ## Install
   - Connect to your OpenWrt router with SSH
   - Go to (and create if needed) the location you want to install the script
 <br /> For example: `mkdir /opt/scripts; cd /opt/scripts`
-  - Download the script: `wget https://raw.githubusercontent.com/bolemo/pia_wg/main/pia_wg.sh`
+  - Download the script: `wget https://raw.githubusercontent.com/Blip9575/pia_wg/release/pia_wg.sh`
   - Give execution permission to the script: `chmod +x pia_wg.sh`
   - Install packages which the script depends on: `opkg update && opkg install jq-full curl wireguard-tools luci-proto-wireguard coreutils-stty coreutils-nl`
   - Configure and run:
@@ -37,7 +46,7 @@ For a typical setup (direct all LAN traffic to/from internet through the newly c
 - Traffic should now only be allowed through the wireguard connection
 
 ## Update
-The script can be updated to the latest version using: `pia_wg.sh update`
+The script can be updated to the latest version using: `pia_wg.sh update` (it is downloaded from the `release` branch of this fork, and installed only if it is a valid script)
 
 ## Advanced/Expert WireGuard network settings (not required for basic/common usage)
 You can setup the script to set any OpenWrt WireGuard network interface or peer settings this way (after running the initial configuration):

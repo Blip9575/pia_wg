@@ -7,14 +7,15 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.16
+# Version: 1.1.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
+# Fork with offline cache and official PIA app login: https://github.com/Blip9575/pia_wg/
 #
 #########
 
-SCRIPTDL="https://raw.githubusercontent.com/bolemo/pia_wg/main/pia_wg.sh"
+SCRIPTDL="https://raw.githubusercontent.com/Blip9575/pia_wg/release/pia_wg.sh"
 SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
 RUNDIR='/var/run/pia' # temporary files (RAM); created on demand, mode 0700
 LOCKDIR="$RUNDIR/pia_wg.lock"
