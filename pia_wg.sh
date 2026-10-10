@@ -454,6 +454,42 @@ pia_tokens() {
   esac
 }
 
+pia_token_forget() {
+  uci -q delete pia_wg.@vpntoken[0]
+  uci -q commit pia_wg
+}
+
+# Register our WireGuard key on a server of the configured region, as the
+# official apps do: by IP (certificate verified against the PIA CA) using the
+# cached servers list, then through the region hostname (legacy behaviour).
+# Response in $PIAADDKEY; $ADDKEYAUTHFAIL is set if a server refused the token.
+pia_addkey() {
+  CA="$(pia_ca)"
+  PUB="$(uci -q get pia_wg.@keys[0].pub)"
+  if [ "$PIAAUTH" = 'vpn' ]; then
+    set -- --user "$(uci -q get pia_wg.@vpntoken[0].user):$(uci -q get pia_wg.@vpntoken[0].pass)"
+  else
+    set -- --data-urlencode "pt=$(uci -q get pia_wg.@token[0].hash)"
+  fi
+  SERVERS="$(jq -r --arg r "$(uci -q get pia_wg.@region[0].id)" \
+    '.regions[] | select(.id == $r) | .servers.wg[]? | "\(.ip) \(.cn) ip"' "$(cache_dir)/servers.json" 2>/dev/null)
+$(uci -q get pia_wg.@region[0].dns) - dns"
+  unset ADDKEYAUTHFAIL
+  while read -r HOST CN MODE; do
+    case "$MODE" in
+    'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 --cacert "$CA" --connect-to "$CN::$HOST:1337" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:1337/addKey")" ;;
+    'dns') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 -G "$@" --data-urlencode "pubkey=$PUB" "https://$HOST:1337/addKey")" ;;
+    *) continue ;;
+    esac
+    [ "$CODE" = '401' ] && ADDKEYAUTHFAIL=1
+    PIAADDKEY="$(cat "$PIARESP")"
+    [ "$(echo "$PIAADDKEY" | jq -r '.status' 2>/dev/null)" = 'OK' ] && return 0
+  done <<EOS
+$SERVERS
+EOS
+  return 1
+}
+
 validate_dip() {
   DIPTOK="$(uci -q get pia_wg.@dip[0].token)" || return
   token_ok apitoken || pia_tokens >/dev/null 2>&1
@@ -684,10 +720,10 @@ set_netconf() {
   echo "Initializing network"
 
   if [ -z "$DIP_STATUS" ]; then
-    if [ "$PIAAUTH" = 'vpn' ]; then
-      PIAADDKEY="$(curl -s -k -G --user "$(uci -q get pia_wg.@vpntoken[0].user):$(uci -q get pia_wg.@vpntoken[0].pass)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@region[0].dns):1337/addKey")"
-    else
-      PIAADDKEY="$(curl -s -k -G --data-urlencode "pt=$(uci -q get pia_wg.@token[0].hash)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@region[0].dns):1337/addKey")"
+    if ! pia_addkey && [ "$ADDKEYAUTHFAIL" ] && [ "$PIAAUTH" = 'vpn' ]; then
+      echo "PIA server refused the VPN token; renewing it" >&3
+      pia_token_forget
+      pia_tokens && pia_addkey
     fi
   else
     PIAADDKEY="$(curl -s -k -G --connect-to "$(uci -q get pia_wg.@dip[0].cn)::$(uci -q get pia_wg.@dip[0].ip)" --user "dedicated_ip_$(uci -q get pia_wg.@dip[0].token):$(uci -q get pia_wg.@dip[0].ip)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@dip[0].cn):1337/addKey")"
