@@ -1285,11 +1285,21 @@ log_clear() {
 
 script_update() {
   TMPDL="$RUNDIR/update.$$.tmp"
-  curl -s -o "$TMPDL" "$SCRIPTDL" || {
+  curl -sfL --max-time 30 -o "$TMPDL" "$SCRIPTDL" || {
     echo "Failed to check/download latest version!" >&2
-    rm "$TMPDL"
+    rm -f "$TMPDL"
     exit 1
   }
+  # Never install anything that is not a pia_wg.sh script (error page, partial
+  # download, wrong file)
+  if [ "$(head -n 1 "$TMPDL")" != '#!/bin/sh' ] ||
+    ! grep -q '^# Version: ' "$TMPDL" ||
+    ! grep -q 'pia_wg' "$TMPDL" ||
+    ! sh -n "$TMPDL" 2>/dev/null; then
+    echo "The downloaded file is not a valid pia_wg.sh script; update aborted!" >&2
+    rm -f "$TMPDL"
+    exit 1
+  fi
   MD5D="$(md5sum "$TMPDL" | cut -d' ' -f1)"
   MD5C="$(md5sum "$SCRIPTPATH" | cut -d' ' -f1)"
   [ "$MD5D" = "$MD5C" ] && {
