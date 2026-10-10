@@ -21,7 +21,8 @@ LOGNAME='pia_wg_watchdog.log'
 PIACONF='/etc/config/pia_wg'
 PIAWG_IF='wg_pia'
 PIAWG_PEER='wgpeer_pia'
-CACHEDEFDIR='/etc/pia_wg'
+CACHEDEFDIR='/mnt/usb/pia_wg' # external storage, to spare the router flash
+CACHERAMDIR='/tmp/pia_wg'     # used when the external storage is not mounted
 SERVERLIST_URL='https://serverlist.piaservers.net/vpninfo/servers/v6'
 META_MAX=6     # verified meta servers to keep in the cache
 META_PROBES=40 # max meta servers to probe per refresh
@@ -69,7 +70,17 @@ logfile() {
 
 cache_dir() {
   CACHEDIR="$(uci -q get pia_wg.@cache[0].dir)" || CACHEDIR="$CACHEDEFDIR"
-  [ -d "$CACHEDIR" ] || mkdir -p "$CACHEDIR"
+  if [ ! -d "$CACHEDIR" ]; then
+    # Under /mnt or /media but not on a mounted filesystem (e.g. USB storage
+    # not mounted yet): use RAM rather than writing to the router flash
+    case "$CACHEDIR" in
+    /mnt/* | /media/*)
+      awk -v d="$CACHEDIR/" '$2 != "/" && index(d, $2 "/") == 1 {f = 1} END {exit !f}' /proc/mounts ||
+        CACHEDIR="$CACHERAMDIR"
+      ;;
+    esac
+    mkdir -p "$CACHEDIR"
+  fi
   echo "$CACHEDIR"
 }
 
@@ -220,6 +231,7 @@ cache_remove() {
 cache_show() {
   CD="$(cache_dir)"
   echo "Cache directory: $CD"
+  [ "$CD" = "$CACHERAMDIR" ] && echo "  (RAM: configured directory not mounted)"
   cache_installed && echo "Cache refresh (cron) installed: YES" || echo "Cache refresh (cron) installed: NO"
   if [ -s "$CD/servers.json" ]; then
     echo "Servers list: $(jq '.regions | length' "$CD/servers.json") regions, updated $(date -r "$CD/servers.json")"

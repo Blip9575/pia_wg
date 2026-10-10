@@ -75,7 +75,7 @@ The offline cache holds:
   - the tokens are stored in `/etc/config/pia_wg` with their expiry
 
 Commands:
-  - `./pia_wg.sh configure cache` sets the cache directory (default `/etc/pia_wg`), extra regions to take meta servers from, and whether meta servers with a certificate not signed by the PIA CA may be used (insecure, off by default)
+  - `./pia_wg.sh configure cache` sets the cache directory (default `/mnt/usb/pia_wg`, on external storage to spare the router flash; if a directory under `/mnt` or `/media` is not on a mounted filesystem, `/tmp/pia_wg` in RAM is used instead), extra regions to take meta servers from, and whether meta servers with a certificate not signed by the PIA CA may be used (insecure, off by default)
   - `./pia_wg.sh cache refresh` refreshes the servers list, the meta servers and renews the tokens ahead of expiry
   - `./pia_wg.sh cache install` (or `--cache` with `start`/`restart`) installs a cron job running `cache refresh` every 6 hours; `./pia_wg.sh cache remove` removes it
   - `./pia_wg.sh cache show` shows the cache
