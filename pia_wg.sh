@@ -643,6 +643,16 @@ EOS
   return 1
 }
 
+# Is the configured region marked in the legacy list ('cache probe')?
+region_needs_legacy() {
+  LRID="$(uci -q get pia_wg.@region[0].id)" || return 1
+  [ -n "$LRID" ] || return 1
+  case " $(legacy_ids) " in
+  *" $LRID "*) return 0 ;;
+  esac
+  return 1
+}
+
 # Legacy (v2) tokens are valid for 24h
 legacy_token_ensure() {
   LTS="$(uci -q get pia_wg.@token[0].timestamp)"
@@ -921,7 +931,12 @@ set_netconf() {
   }
   # if no DIP (DIP_STATUS is set from check_conf)
   if [ -z "$DIP_STATUS" ]; then
-    if pia_tokens; then
+    if region_needs_legacy; then
+      # Its servers refuse the VPN token: do not even try it
+      echo "Region needs the legacy token; skipping the VPN token"
+      legacy_token_ensure
+      PIAAUTH='legacy'
+    elif pia_tokens; then
       PIAAUTH='vpn'
     else
       echo "Could not get a PIA VPN token; trying the legacy token API" >&3
