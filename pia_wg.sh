@@ -21,6 +21,10 @@ LOGNAME='pia_wg_watchdog.log'
 PIACONF='/etc/config/pia_wg'
 PIAWG_IF='wg_pia'
 PIAWG_PEER='wgpeer_pia'
+CACHEDEFDIR='/etc/pia_wg'
+SERVERLIST_URL='https://serverlist.piaservers.net/vpninfo/servers/v6'
+META_MAX=6     # verified meta servers to keep in the cache
+META_PROBES=40 # max meta servers to probe per refresh
 CURVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$SCRIPTPATH")"
 
 read_yn() {
@@ -63,9 +67,188 @@ logfile() {
   fi
 }
 
+cache_dir() {
+  CACHEDIR="$(uci -q get pia_wg.@cache[0].dir)" || CACHEDIR="$CACHEDEFDIR"
+  [ -d "$CACHEDIR" ] || mkdir -p "$CACHEDIR"
+  echo "$CACHEDIR"
+}
+
+# PIA RSA-4096 CA, as shipped by the official PIA apps (pia-foss)
+pia_ca() {
+  PIACA="$(cache_dir)/ca.rsa.4096.crt"
+  [ -s "$PIACA" ] || cat >"$PIACA" <<'EOC'
+-----BEGIN CERTIFICATE-----
+MIIHqzCCBZOgAwIBAgIJAJ0u+vODZJntMA0GCSqGSIb3DQEBDQUAMIHoMQswCQYD
+VQQGEwJVUzELMAkGA1UECBMCQ0ExEzARBgNVBAcTCkxvc0FuZ2VsZXMxIDAeBgNV
+BAoTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMSAwHgYDVQQLExdQcml2YXRlIElu
+dGVybmV0IEFjY2VzczEgMB4GA1UEAxMXUHJpdmF0ZSBJbnRlcm5ldCBBY2Nlc3Mx
+IDAeBgNVBCkTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMS8wLQYJKoZIhvcNAQkB
+FiBzZWN1cmVAcHJpdmF0ZWludGVybmV0YWNjZXNzLmNvbTAeFw0xNDA0MTcxNzQw
+MzNaFw0zNDA0MTIxNzQwMzNaMIHoMQswCQYDVQQGEwJVUzELMAkGA1UECBMCQ0Ex
+EzARBgNVBAcTCkxvc0FuZ2VsZXMxIDAeBgNVBAoTF1ByaXZhdGUgSW50ZXJuZXQg
+QWNjZXNzMSAwHgYDVQQLExdQcml2YXRlIEludGVybmV0IEFjY2VzczEgMB4GA1UE
+AxMXUHJpdmF0ZSBJbnRlcm5ldCBBY2Nlc3MxIDAeBgNVBCkTF1ByaXZhdGUgSW50
+ZXJuZXQgQWNjZXNzMS8wLQYJKoZIhvcNAQkBFiBzZWN1cmVAcHJpdmF0ZWludGVy
+bmV0YWNjZXNzLmNvbTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALVk
+hjumaqBbL8aSgj6xbX1QPTfTd1qHsAZd2B97m8Vw31c/2yQgZNf5qZY0+jOIHULN
+De4R9TIvyBEbvnAg/OkPw8n/+ScgYOeH876VUXzjLDBnDb8DLr/+w9oVsuDeFJ9K
+V2UFM1OYX0SnkHnrYAN2QLF98ESK4NCSU01h5zkcgmQ+qKSfA9Ny0/UpsKPBFqsQ
+25NvjDWFhCpeqCHKUJ4Be27CDbSl7lAkBuHMPHJs8f8xPgAbHRXZOxVCpayZ2SND
+fCwsnGWpWFoMGvdMbygngCn6jA/W1VSFOlRlfLuuGe7QFfDwA0jaLCxuWt/BgZyl
+p7tAzYKR8lnWmtUCPm4+BtjyVDYtDCiGBD9Z4P13RFWvJHw5aapx/5W/CuvVyI7p
+Kwvc2IT+KPxCUhH1XI8ca5RN3C9NoPJJf6qpg4g0rJH3aaWkoMRrYvQ+5PXXYUzj
+tRHImghRGd/ydERYoAZXuGSbPkm9Y/p2X8unLcW+F0xpJD98+ZI+tzSsI99Zs5wi
+jSUGYr9/j18KHFTMQ8n+1jauc5bCCegN27dPeKXNSZ5riXFL2XX6BkY68y58UaNz
+meGMiUL9BOV1iV+PMb7B7PYs7oFLjAhh0EdyvfHkrh/ZV9BEhtFa7yXp8XR0J6vz
+1YV9R6DYJmLjOEbhU8N0gc3tZm4Qz39lIIG6w3FDAgMBAAGjggFUMIIBUDAdBgNV
+HQ4EFgQUrsRtyWJftjpdRM0+925Y6Cl08SUwggEfBgNVHSMEggEWMIIBEoAUrsRt
+yWJftjpdRM0+925Y6Cl08SWhge6kgeswgegxCzAJBgNVBAYTAlVTMQswCQYDVQQI
+EwJDQTETMBEGA1UEBxMKTG9zQW5nZWxlczEgMB4GA1UEChMXUHJpdmF0ZSBJbnRl
+cm5ldCBBY2Nlc3MxIDAeBgNVBAsTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMSAw
+HgYDVQQDExdQcml2YXRlIEludGVybmV0IEFjY2VzczEgMB4GA1UEKRMXUHJpdmF0
+ZSBJbnRlcm5ldCBBY2Nlc3MxLzAtBgkqhkiG9w0BCQEWIHNlY3VyZUBwcml2YXRl
+aW50ZXJuZXRhY2Nlc3MuY29tggkAnS7684Nkme0wDAYDVR0TBAUwAwEB/zANBgkq
+hkiG9w0BAQ0FAAOCAgEAJsfhsPk3r8kLXLxY+v+vHzbr4ufNtqnL9/1Uuf8NrsCt
+pXAoyZ0YqfbkWx3NHTZ7OE9ZRhdMP/RqHQE1p4N4Sa1nZKhTKasV6KhHDqSCt/dv
+Em89xWm2MVA7nyzQxVlHa9AkcBaemcXEiyT19XdpiXOP4Vhs+J1R5m8zQOxZlV1G
+tF9vsXmJqWZpOVPmZ8f35BCsYPvv4yMewnrtAC8PFEK/bOPeYcKN50bol22QYaZu
+LfpkHfNiFTnfMh8sl/ablPyNY7DUNiP5DRcMdIwmfGQxR5WEQoHL3yPJ42LkB5zs
+6jIm26DGNXfwura/mi105+ENH1CaROtRYwkiHb08U6qLXXJz80mWJkT90nr8Asj3
+5xN2cUppg74nG3YVav/38P48T56hG1NHbYF5uOCske19F6wi9maUoto/3vEr0rnX
+JUp2KODmKdvBI7co245lHBABWikk8VfejQSlCtDBXn644ZMtAdoxKNfR2WTFVEwJ
+iyd1Fzx0yujuiXDROLhISLQDRjVVAvawrAtLZWYK31bY7KlezPlQnl/D9Asxe85l
+8jO5+0LdJ6VyOs/Hd4w52alDW/MFySDZSfQHMTIc30hLBJ8OnCEIvluVQQ2UQvoW
++no177N9L2Y+M9TcTA62ZyMXShHQGeh20rb4kK8f+iFX8NxtdHVSkxMEFSfDDyQ=
+-----END CERTIFICATE-----
+EOC
+  echo "$PIACA"
+}
+
+# Meta servers ("ip cn") of the cached list: configured and extra regions first
+meta_candidates() {
+  SL="$(cache_dir)/servers.json"
+  [ -s "$SL" ] || return
+  jq -r --arg regs "$(uci -q get pia_wg.@region[0].id) $(uci -q get pia_wg.@cache[0].regions)" '
+    ($regs | split(" ") | map(select(length > 0))) as $r
+    | [.regions[] | select(.offline == false)]
+    | map(select(.id as $i | $r | index($i))) + map(select(.id as $i | $r | index($i) | not))
+    | .[].servers.meta[]? | "\(.ip) \(.cn)"' "$SL"
+}
+
+# Keep the meta servers whose certificate validates against the PIA CA
+meta_refresh() {
+  CD="$(cache_dir)"
+  CA="$(pia_ca)"
+  N=0
+  P=0
+  : >"$CD/meta.list.tmp"
+  while read -r IP CN; do
+    [ "$IP" ] || continue
+    [ $P -ge $META_PROBES ] && break
+    P=$((P + 1))
+    curl -s -o /dev/null --max-time 5 --cacert "$CA" --connect-to "$CN::$IP:443" "https://$CN/" || continue
+    echo "$IP $CN" >>"$CD/meta.list.tmp"
+    N=$((N + 1))
+    [ $N -ge $META_MAX ] && break
+  done <<EOM
+$(meta_candidates)
+EOM
+  if [ $N -eq 0 ]; then
+    rm -f "$CD/meta.list.tmp"
+    echo "No verified PIA meta server reachable; keeping cached ones" >&3
+    return 1
+  fi
+  cmp -s "$CD/meta.list.tmp" "$CD/meta.list" && rm "$CD/meta.list.tmp" || mv "$CD/meta.list.tmp" "$CD/meta.list"
+  echo "Verified PIA meta servers cached: $N"
+}
+
+# Fetch the servers list through verified meta servers (by IP), then the public hostname
+cache_refresh_list() {
+  CD="$(cache_dir)"
+  CA="$(pia_ca)"
+  TMP="$CD/servers.json.tmp"
+  : >"$TMP"
+  while read -r IP CN; do
+    [ "$IP" ] || continue
+    curl -sf --max-time 15 --cacert "$CA" --connect-to "$CN::$IP:443" "https://$CN/vpninfo/servers/v6" | head -1 >"$TMP"
+    jq -e '.regions | length > 0' "$TMP" >/dev/null 2>&1 && break
+  done <<EOM
+$(cat "$CD/meta.list" 2>/dev/null)
+EOM
+  jq -e '.regions | length > 0' "$TMP" >/dev/null 2>&1 ||
+    curl -sf --max-time 15 "$SERVERLIST_URL" | head -1 >"$TMP"
+  if jq -e '.regions | length > 0' "$TMP" >/dev/null 2>&1; then
+    cmp -s "$TMP" "$CD/servers.json" && rm "$TMP" || mv "$TMP" "$CD/servers.json"
+    echo "PIA servers list cached"
+  else
+    rm -f "$TMP"
+    echo "Could not fetch PIA servers list; keeping cached one" >&3
+    return 1
+  fi
+}
+
+cache_refresh() {
+  cache_refresh_list
+  R=$?
+  meta_refresh || R=1
+  return $R
+}
+
+cache_installed() {
+  grep -qF 'pia_wg.sh cache refresh' /etc/crontabs/root 2>/dev/null
+}
+
+cache_install() {
+  cache_installed && return
+  {
+    crontab -l
+    echo "17 */6 * * * /bin/sh $SCRIPTPATH cache refresh # pia_wg cache"
+  } | crontab -
+  echo "[$(date)] Cache refresh installed" >>"$PIALOG"
+}
+
+cache_remove() {
+  cache_installed || return
+  crontab -l | grep -vF 'pia_wg.sh cache refresh' | crontab -
+  echo "[$(date)] Cache refresh removed" >>"$PIALOG"
+}
+
+cache_show() {
+  CD="$(cache_dir)"
+  echo "Cache directory: $CD"
+  cache_installed && echo "Cache refresh (cron) installed: YES" || echo "Cache refresh (cron) installed: NO"
+  if [ -s "$CD/servers.json" ]; then
+    echo "Servers list: $(jq '.regions | length' "$CD/servers.json") regions, updated $(date -r "$CD/servers.json")"
+    PIAREGIONID="$(uci -q get pia_wg.@region[0].id)" &&
+      jq -r --arg r "$PIAREGIONID" '.regions[] | select(.id == $r) | .servers.wg[]? | "  wg   \(.ip) \(.cn)"' "$CD/servers.json"
+  else
+    echo "Servers list: none"
+  fi
+  [ -s "$CD/meta.list" ] && awk '{print "  meta "$0}' "$CD/meta.list" || echo "Verified meta servers: none"
+}
+
+set_cache() {
+  CACHEDIR="$(uci -q get pia_wg.@cache[0].dir)" || CACHEDIR="$CACHEDEFDIR"
+  printf "Directory for the offline cache (press enter for %s): " "$CACHEDIR"
+  read -r NEWCACHEDIR
+  [ -z "$NEWCACHEDIR" ] || CACHEDIR="$NEWCACHEDIR"
+  printf "Extra region IDs to take meta servers from, space separated (press enter for none): "
+  read -r CACHEREGIONS
+  read_yn "Allow meta servers whose certificate is not signed by the PIA CA (insecure)" && CACHEINSECURE=1 || CACHEINSECURE=0
+  {
+    echo "delete pia_wg.@cache[0]"
+    echo "add pia_wg cache"
+    echo "set pia_wg.@cache[0].dir=\"$CACHEDIR\""
+    echo "set pia_wg.@cache[0].insecure_meta=\"$CACHEINSECURE\""
+    for R in $CACHEREGIONS; do echo "add_list pia_wg.@cache[0].regions=\"$R\""; done
+    echo "commit pia_wg"
+  } | uci -q batch >/dev/null
+}
+
 select_region() {
   echo "Fetching latest PIA servers list…"
-  if ! PIAREGIONS="$(curl -sf https://serverlist.piaservers.net/vpninfo/servers/v6 | head -1 | jq -e '.regions | sort_by(.name)')"; then
+  cache_refresh_list || echo "Using cached PIA servers list"
+  if ! PIAREGIONS="$(jq -e '.regions | sort_by(.name)' "$(cache_dir)/servers.json" 2>/dev/null)"; then
     echo "Error fetching PIA servers list!" >&3
     exit 1
   fi
@@ -104,6 +287,8 @@ select_region() {
     set pia_wg.@region[0].dns="$PIAREGIONDNS"
     commit pia_wg.@region[0]
 EOI
+  echo "Checking PIA meta servers…"
+  meta_refresh
 }
 
 set_piauser() {
@@ -260,6 +445,7 @@ keep_conf_section() {
   net_peer) DESC='WireGuard network PIA peer options' ;;
   region) DESC='PIA region' ;;
   dip) DESC="Dedicated IP token" ;;
+  cache) DESC="Offline cache" ;;
   esac
   if uci -q get "pia_wg.@$1[0]" >/dev/null; then
     echo "A configuration already exists for '$DESC':"
@@ -484,8 +670,19 @@ script_update() {
   echo "Done"
 }
 
+# Install the cron jobs requested with --watchdog and/or --cache
+install_jobs() {
+  shift
+  for A in "$@"; do
+    case "$A" in
+    '--watchdog') watchdog_install ;;
+    '--cache') cache_install ;;
+    esac
+  done
+}
+
 print_usage() {
-  echo "Usage: $0 { configure <section> | start [ --watchdog ] | restart [ --watchdog ] | stop | status | watchdog { install | remove } | log { show | clear | path } | update | version}"
+  echo "Usage: $0 { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | watchdog { install | remove } | cache { refresh | install | remove | show } | log { show | clear | path } | update | version}"
   echo "  Details:"
   echo "    - configure          : same as configure all"
   echo "    - configure all      : configure all settings"
@@ -493,16 +690,22 @@ print_usage() {
   echo "    - configure dip      : set PIA dedicated IP"
   echo "    - configure region   : set/choose PIA region"
   echo "    - configure keys     : generate local WireGuard keys"
+  echo "    - configure cache    : set offline cache directory and options"
   echo "    - configure network  : generate default network settings"
   echo "    - init-network       : setup PIA WireGuard network (no start)"
   echo "    - start              : start PIA WireGuard (if not already up)"
   echo "    - start --watchdog   : same as start and install the watchdog"
   echo "    - restart            : start or restart PIA WireGuard"
   echo "    - restart --watchdog : same as restart and install the watchdog"
+  echo "    - start|restart --cache : same and install the cache refresh"
   echo "    - stop               : stop PIA WireGuard (and remove the watchdog)"
   echo "    - status             : show PIA WireGuard status"
   echo "    - watchdog install   : install the watchdog"
   echo "    - watchdog remove    : remove the watchdog"
+  echo "    - cache refresh      : refresh the offline cache (servers list, meta servers)"
+  echo "    - cache install      : install the cache refresh (cron, every 6 hours)"
+  echo "    - cache remove       : remove the cache refresh"
+  echo "    - cache show         : show the offline cache"
   echo "    - log show           : display the watchdog log"
   echo "    - log clear          : clear the watchdog log"
   echo "    - log path           : set a custom Directory Path for the log"
@@ -551,6 +754,7 @@ case "$1" in
     fi
     # if no DIP ask for region
     uci -q get pia_wg.@dip[0].token >/dev/null || keep_conf_section 'region' || select_region
+    keep_conf_section 'cache' || set_cache
     ;;
   'user') keep_conf_section 'user' || set_piauser ;;
   'dip') keep_conf_section 'dip' || set_dip ;;
@@ -560,6 +764,7 @@ case "$1" in
     keep_conf_section 'net_peer' || set_defnetpeer
     ;;
   'keys') keep_conf_section 'keys' || generate_wgkeys ;;
+  'cache') keep_conf_section 'cache' || set_cache ;;
   *)
     echo "Unknown configure subcommand '$2'!"
     print_usage
@@ -575,11 +780,22 @@ case "$1" in
     exit 1
     ;;
   esac ;;
+'cache') case "$2" in
+  'refresh') cache_refresh ;;
+  'install') cache_install ;;
+  'remove') cache_remove ;;
+  'show') cache_show ;;
+  *)
+    echo "Unknown cache subcommand '$2'!"
+    print_usage
+    exit 1
+    ;;
+  esac ;;
 'init-network') set_netconf ;;
 'restart')
   start_wgpia
   R=$?
-  [ $R -eq 0 ] && [ "$2" = "--watchdog" ] && watchdog_install
+  [ $R -eq 0 ] && install_jobs "$@"
   exit $R
   ;;
 'start')
@@ -590,7 +806,7 @@ case "$1" in
   2) echo "Could not start PIA!" >&2 ;;
   esac
   R=$?
-  [ $R -eq 0 ] && [ "$2" = "--watchdog" ] && watchdog_install
+  [ $R -eq 0 ] && install_jobs "$@"
   exit $R
   ;;
 'stop')
