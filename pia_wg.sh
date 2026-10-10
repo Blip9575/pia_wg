@@ -318,24 +318,24 @@ legacy_probe() {
       for SRV in $SRVS; do
         # Some servers answer differently from one request to the next: a
         # server counts as refusing only if it refuses twice in a row
-        ANS=''
+        VERDICT=''
         for _ in 1 2; do
           CODE="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 4 --max-time 8 -G \
             ${PIF:+--interface "if!$PIF"} --cacert "$CA" --connect-to "${SRV#*,}::${SRV%%,*}:1337" --user "$LU:$LP" \
             --data-urlencode "pubkey=probe" "https://${SRV#*,}:1337/addKey")"
           case "$CODE" in
           200 | 409)
-            ANS='ok'
+            VERDICT='ok'
             break
             ;;
-          401) ANS='refused' ;;
+          401) VERDICT='refused' ;;
           *)
-            ANS=''
+            VERDICT=''
             break
             ;;
           esac
         done
-        case "$ANS" in
+        case "$VERDICT" in
         ok)
           REF=0
           TRY=1
