@@ -19,7 +19,11 @@ SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
 LOGDEFPATH='/var/log'
 LOGNAME='pia_wg_watchdog.log'
 PIACONF='/etc/config/pia_wg'
-PIAWG_IF='wg_pia'
+PIAWG_IF="$(uci -q get pia_wg.@iface[0].name)" || PIAWG_IF='wg_pia'
+case "$PIAWG_IF" in
+'' | *[!A-Za-z0-9_]*) PIAWG_IF='wg_pia' ;;
+esac
+[ ${#PIAWG_IF} -le 15 ] || PIAWG_IF='wg_pia'
 PIAWG_PEER='wgpeer_pia'
 CACHEDEFDIR='/mnt/usb/pia_wg' # external storage, to spare the router flash
 CACHERAMDIR='/tmp/pia_wg'     # used when the external storage is not mounted
@@ -324,18 +328,23 @@ set_piauser() {
 EOI
 }
 
+# Private (mode 0600) file receiving PIA API responses; removed on exit
+piaresp_init() {
+  [ -n "$PIARESP" ] || PIARESP="$(mktemp /tmp/pia_wg_api.XXXXXX)"
+}
+
 # pia_api <meta path> <subdomain> <domain path> [curl args…]
 # Call the PIA API the way the official apps do: through cached meta servers
 # by IP (certificate verified against the PIA CA), then unverified meta servers
 # if pia_wg.@cache[0].insecure_meta is set, then privateinternetaccess.com and
 # piaproxy.net. The response body is left in $PIARESP.
 # Returns 0 on HTTP 2xx, 1 on HTTP 401 (bad credentials/token), 2 otherwise.
-PIARESP="/tmp/pia_wg_api.resp"
 pia_api() {
   MPATH="$1"
   SUB="$2"
   DPATH="$3"
   shift 3
+  piaresp_init
   CA="$(pia_ca)"
   CD="$(cache_dir)"
   EPS="$(awk '{print $1, $2, "pin"}' "$CD/meta.list" 2>/dev/null)"
@@ -363,9 +372,10 @@ EOE
   return 2
 }
 
-# ISO 8601 date (as returned by the PIA API) to epoch; 0 if unknown
+# ISO 8601 UTC date (as returned by the PIA API) to epoch; 0 if unknown.
+# Only slices the string: jq on OpenWrt may be built without regex support.
 iso2epoch() {
-  printf '"%s"' "$1" | jq -r 'try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) catch 0'
+  jq -nr --arg d "$1" 'try (($d[0:19] + "Z") | fromdateiso8601) catch 0' 2>/dev/null || echo 0
 }
 
 # token_ok <section> [renew]: is the stored token in pia_wg.@<section>[0]
@@ -476,6 +486,7 @@ pia_token_forget() {
 # cached servers list, then through the region hostname (legacy behaviour).
 # Response in $PIAADDKEY; $ADDKEYAUTHFAIL is set if a server refused the token.
 pia_addkey() {
+  piaresp_init
   CA="$(pia_ca)"
   PUB="$(uci -q get pia_wg.@keys[0].pub)"
   if [ "$PIAAUTH" = 'vpn' ]; then
@@ -562,6 +573,36 @@ set_dip() {
     set pia_wg.@dip[0].token="$DIPTOK"
     commit pia_wg.@dip[0]
 EOI
+}
+
+set_iface() {
+  printf "Name of the WireGuard network interface (press enter to keep %s): " "$PIAWG_IF"
+  read -r NEWIF
+  [ -z "$NEWIF" ] && NEWIF="$PIAWG_IF"
+  case "$NEWIF" in
+  '' | *[!A-Za-z0-9_]*)
+    echo "Invalid name: use letters, digits and underscore only!" >&3
+    return 1
+    ;;
+  esac
+  [ ${#NEWIF} -le 15 ] || {
+    echo "Invalid name: 15 characters at most!" >&3
+    return 1
+  }
+  if [ "$NEWIF" != "$PIAWG_IF" ] && uci -q get "network.$PIAWG_IF" >/dev/null; then
+    # Remove the interface created under the previous name
+    ifdown "$PIAWG_IF" >/dev/null 2>&1
+    uci -q delete "network.$PIAWG_IF"
+    uci -q delete "network.$PIAWG_PEER"
+    uci -q commit network
+  fi
+  uci -q batch <<EOI >/dev/null
+    delete pia_wg.@iface[0]
+    add pia_wg iface
+    set pia_wg.@iface[0].name="$NEWIF"
+    commit pia_wg.@iface[0]
+EOI
+  PIAWG_IF="$NEWIF"
 }
 
 set_defnetpeer() {
@@ -771,7 +812,7 @@ set_netconf() {
 $(uci export pia_wg | awk '
     $0==""{d=0;next}
     index($0,"config net_"){
-      if($2=="net_interface"){d="network.'$PIAWG_IF'"}
+      if($2=="net_interface"){d="network.'"$PIAWG_IF"'"}
       else if($2=="net_peer"){d="network.'$PIAWG_PEER'"}
     }
     d{
@@ -791,7 +832,7 @@ start_wgpia() {
   stop_wgpia
   set_netconf
   echo "Starting PIA ($(uci get network.$PIAWG_PEER.description))" >&3
-  ifup $PIAWG_IF
+  ifup "$PIAWG_IF"
   sleep 1
   check_wg
   RET=$?
@@ -802,7 +843,7 @@ start_wgpia() {
 stop_wgpia() {
   DESC=" ($(uci -q get network.$PIAWG_PEER.description))" || DESC=""
   echo "Stopping PIA$DESC" >&3
-  ifdown $PIAWG_IF >/dev/null 2>&1
+  ifdown "$PIAWG_IF" >/dev/null 2>&1
 }
 
 check_wg() {
@@ -910,6 +951,7 @@ print_usage() {
   echo "    - configure dip      : set PIA dedicated IP"
   echo "    - configure region   : set/choose PIA region"
   echo "    - configure keys     : generate local WireGuard keys"
+  echo "    - configure interface: set the network interface name (default wg_pia)"
   echo "    - configure cache    : set offline cache directory and options"
   echo "    - configure network  : generate default network settings"
   echo "    - init-network       : setup PIA WireGuard network (no start)"
@@ -947,6 +989,7 @@ if [ "$AUTO" ]; then
   _exit() {
     exec 3>&-
     rm "$FIFO" >/dev/null 2>&1
+    [ -z "$PIARESP" ] || rm -f "$PIARESP"
     exit
   }
   trap "_exit" 1 2 3 6 EXIT
@@ -956,6 +999,7 @@ if [ "$AUTO" ]; then
   exec 3<>"$FIFO"
 else
   exec 3>&2
+  trap '[ -z "$PIARESP" ] || rm -f "$PIARESP"' EXIT
 fi
 
 case "$1" in
@@ -985,6 +1029,7 @@ case "$1" in
     ;;
   'keys') keep_conf_section 'keys' || generate_wgkeys ;;
   'cache') keep_conf_section 'cache' || set_cache ;;
+  'interface') set_iface ;;
   *)
     echo "Unknown configure subcommand '$2'!"
     print_usage

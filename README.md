@@ -58,6 +58,9 @@ uci commit pia_wg.@net_interface[0]
 
 Then, next time you use `./pia_wg.sh start` (if not already started, otherwise you need to restart or do stop then start to enable the new configuration) or `./pia_wg.sh restart`, it will use these extra settings when OpenWrt WireGuard will create the PIA interface and the PIA peer.
 
+## Interface name
+The network interface is named `wg_pia` by default. To use another name (letters, digits and underscore, 15 characters at most), run `./pia_wg.sh configure interface`, or set it directly: `uci set pia_wg.@iface[0].name=vpn_pia` (after `uci add pia_wg iface`). Adapt your firewall zone's covered network accordingly. When the name is changed with `configure interface`, the interface created under the previous name is removed.
+
 ## Watchdog
 The script can install a watchdog that will check regularly the status and restart the VPN if needed.
 <br/> For that, just use `--watchdog` when using `start`or `restart`, or run the command `./pia_wg.sh watchdog install`
@@ -106,6 +109,7 @@ Usage: `pia_wg.sh { configure <section> | start [ --watchdog ] [ --cache ] | res
   - `configure dip`      : set PIA dedicated IP
   - `configure region`   : set/choose PIA region
   - `configure keys`     : generate local WireGuard keys
+  - `configure interface`: set the network interface name (default `wg_pia`)
   - `configure cache`    : set offline cache directory and options
   - `configure network`  : generate default network settings
   - `init-network`       : setup PIA WireGuard network (no start)
