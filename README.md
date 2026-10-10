@@ -82,6 +82,12 @@ Commands:
   - `./pia_wg.sh cache refresh` refreshes the servers list, the meta servers and renews the tokens ahead of expiry
   - `./pia_wg.sh cache install` (or `--cache` with `start`/`restart`) installs a cron job running `cache refresh` every 6 hours; `./pia_wg.sh cache remove` removes it
   - `./pia_wg.sh cache show` shows the cache
+  - `./pia_wg.sh cache probe` checks which regions need the legacy token (see below)
+
+### Regions needing the legacy token
+Some PIA WireGuard servers refuse the long lived VPN token and only accept the legacy 24h token, which has to be renewed more often. In `configure region`, the regions for which every server refused the VPN token are marked `(L)`. The script uses the legacy token for them automatically, so they work, but they depend on the 24h token being renewable (the cache refresh job does it).
+
+The first time (and when the result is older than a week), `configure region` offers to check the regions; this takes a few minutes. It can also be run with `./pia_wg.sh cache probe`. The check calls `addKey` with a deliberately invalid public key, so no key is registered on the servers, and leaves through the WAN, because PIA does not accept it from inside its own tunnel. Some servers answer differently from one request to the next; a region is marked only if its servers refuse every time. The result is a snapshot, kept with its date in `legacy.list` in the cache directory.
 
 When the VPN is up the router's own traffic goes through it, so the cron job keeps the cache and tokens fresh even where PIA is blocked. Before travelling to such a place, configure and start the VPN, and run `./pia_wg.sh cache refresh` while PIA is reachable so that the cache and tokens are fresh.
 
@@ -126,6 +132,7 @@ Usage: `pia_wg.sh { configure <section> | start [ --watchdog ] [ --cache ] | res
   - `cache install`      : install the cache refresh (cron, every 6 hours)
   - `cache remove`       : remove the cache refresh
   - `cache show`         : show the offline cache
+  - `cache probe`        : check which regions need the legacy token
   - `log show`           : display the watchdog log
   - `log clear`          : clear the watchdog log
   - `log path`           : set a custom Directory Path for the log

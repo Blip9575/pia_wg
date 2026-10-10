@@ -28,8 +28,9 @@ PIAWG_PEER='wgpeer_pia'
 CACHEDEFDIR='/mnt/usb/pia_wg' # external storage, to spare the router flash
 CACHERAMDIR='/tmp/pia_wg'     # used when the external storage is not mounted
 SERVERLIST_URL='https://serverlist.piaservers.net/vpninfo/servers/v6'
-META_MAX=6     # verified meta servers to keep in the cache
-META_PROBES=40 # max meta servers to probe per refresh
+META_MAX=6           # verified meta servers to keep in the cache
+META_PROBES=40       # max meta servers to probe per refresh
+LEGACY_MAXAGE=604800 # age (s) after which the legacy-token regions are probed again
 CURVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$SCRIPTPATH")"
 
 read_yn() {
@@ -244,6 +245,10 @@ cache_show() {
   else
     echo "Servers list: none"
   fi
+  LSTAMP="$(legacy_stamp)"
+  if [ -n "$LSTAMP" ]; then
+    echo "Regions needing the legacy token: $(legacy_ids | wc -w) (checked $(date -d "@$LSTAMP" 2>/dev/null))"
+  fi
   [ -s "$CD/meta.list" ] && awk '{print "  meta "$0}' "$CD/meta.list" || echo "Verified meta servers: none"
 }
 
@@ -263,6 +268,97 @@ set_cache() {
     for R in $CACHEREGIONS; do echo "add_list pia_wg.@cache[0].regions=\"$R\""; done
     echo "commit pia_wg"
   } | uci -q batch >/dev/null
+}
+
+# Regions whose WireGuard servers refuse the VPN token (HTTP 401 on addKey) and
+# only accept the legacy 24h token. addKey is called with a deliberately invalid
+# public key: a server that accepts the token answers 409 (invalid key) and
+# registers nothing, one that refuses it answers 401. The first server of each
+# online region is asked, then the others if it refuses; a region is listed (in
+# $CACHE/legacy.list, after a '# <epoch>' line) only if all the servers that
+# answered refused.
+legacy_probe() {
+  CD="$(cache_dir)"
+  [ -s "$CD/servers.json" ] || {
+    echo "No servers list yet; run 'cache refresh' first" >&3
+    return 1
+  }
+  pia_tokens >/dev/null 2>&1 || {
+    echo "Cannot get a PIA VPN token; regions not checked" >&3
+    return 1
+  }
+  # PIA servers do not accept addKey from inside a PIA tunnel: leave through
+  # the WAN device used to reach the tunnel endpoint
+  PIF=''
+  if wg show "$PIAWG_IF" >/dev/null 2>&1; then
+    PEP="$(wg show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit}')"
+    PMK="$(wg show "$PIAWG_IF" fwmark)"
+    [ "$PMK" = 'off' ] && PMK=''
+    PIF="$(ip route get "$PEP" ${PMK:+mark "$PMK"} | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+  fi
+  CA="$(pia_ca)"
+  LU="$(uci -q get pia_wg.@vpntoken[0].user)"
+  LP="$(uci -q get pia_wg.@vpntoken[0].pass)"
+  echo "# $(date +%s)" >"$CD/legacy.list.tmp"
+  jq -r '.regions[] | select(.offline == false) | select((.servers.wg // []) | length > 0)
+    | "\(.id) " + (.servers.wg | map("\(.ip),\(.cn)") | join(" "))' "$CD/servers.json" |
+    while read -r RID SRVS; do
+      REF=0
+      TRY=0
+      for SRV in $SRVS; do
+        # Some servers answer differently from one request to the next: a
+        # server counts as refusing only if it refuses twice in a row
+        ANS=''
+        for _ in 1 2; do
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 4 --max-time 8 -G \
+            ${PIF:+--interface "if!$PIF"} --cacert "$CA" --connect-to "${SRV#*,}::${SRV%%,*}:1337" --user "$LU:$LP" \
+            --data-urlencode "pubkey=probe" "https://${SRV#*,}:1337/addKey")"
+          case "$CODE" in
+          200 | 409)
+            ANS='ok'
+            break
+            ;;
+          401) ANS='refused' ;;
+          *)
+            ANS=''
+            break
+            ;;
+          esac
+        done
+        case "$ANS" in
+        ok)
+          REF=0
+          TRY=1
+          break
+          ;;
+        refused)
+          REF=$((REF + 1))
+          TRY=$((TRY + 1))
+          ;;
+        esac
+      done
+      [ $TRY -gt 0 ] && [ $REF -eq $TRY ] && echo "$RID" >>"$CD/legacy.list.tmp"
+      printf '.' >&3
+    done
+  echo >&3
+  mv "$CD/legacy.list.tmp" "$CD/legacy.list"
+}
+
+# Space separated ids of the regions known to need the legacy token
+legacy_ids() {
+  grep -v '^#' "$(cache_dir)/legacy.list" 2>/dev/null | tr '\n' ' '
+}
+
+# Epoch of the last legacy_probe, empty if never
+legacy_stamp() {
+  sed -n '1s/^# //p' "$(cache_dir)/legacy.list" 2>/dev/null
+}
+
+# Numbered list of the online WireGuard regions, (L) marking those needing the
+# legacy token. Uses $PIAREGIONS, $PIASERVPF, $PIASERVGEO and $LEGACYIDS.
+region_names() {
+  echo "$PIAREGIONS" | jq -r --arg l "$LEGACYIDS" ".[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO |
+    .id as \$id | .name + (if (\$l | split(\" \") | any(.[]; . == \$id)) then \" (L)\" else \"\" end)" | nl -v0
 }
 
 select_region() {
@@ -287,14 +383,30 @@ select_region() {
     fi
   done
   if [ -z "$PIAREGIONID" ]; then
+    LSTAMP="$(legacy_stamp)"
+    if [ -z "$AUTO" ] && { [ -z "$LSTAMP" ] || [ $(($(date +%s) - LSTAMP)) -gt "$LEGACY_MAXAGE" ]; }; then
+      read_yn "Check which regions need the legacy token (takes a few minutes)" && legacy_probe
+      LSTAMP="$(legacy_stamp)"
+    fi
+    LEGACYIDS="$(legacy_ids)"
     echo "Eliminating offline servers…"
     echo "Eliminating non WireGuard servers…"
     read_yn "Port forward only servers" && PIASERVPF='| select(.port_forward==true) ' || PIASERVPF=''
     read_yn "Geo only servers" && PIASERVGEO='| select(.geo==true) ' || PIASERVGEO=''
-    echo "$PIAREGIONS" | jq -r ".[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO | .name" | nl -v0
-    printf "Select your region number: "
-    read -r AND
-    PIAREGIONID="$(echo "$PIAREGIONS" | jq -r "[.[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO ][$AND].id")"
+    region_names
+    if [ -n "$LSTAMP" ]; then
+      echo "(L) = needs the 24h legacy token (checked $(date -d "@$LSTAMP" 2>/dev/null))"
+    fi
+    while :; do
+      printf "Select your region number: "
+      read -r AND || exit 1
+      case "$AND" in
+      '' | *[!0-9]*) PIAREGIONID='' ;;
+      *) PIAREGIONID="$(echo "$PIAREGIONS" | jq -r "[.[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO ][$AND].id // empty")" ;;
+      esac
+      [ -n "$PIAREGIONID" ] && break
+      echo "Invalid region number: '$AND'"
+    done
   fi
   PIAREGIONNAME="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .name")"
   PIAREGIONDNS="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .dns")"
@@ -976,7 +1088,7 @@ install_jobs() {
 }
 
 print_usage() {
-  echo "Usage: $0 { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | watchdog { install | remove } | cache { refresh | install | remove | show } | log { show | clear | path } | update | version}"
+  echo "Usage: $0 { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | watchdog { install | remove } | cache { refresh | install | remove | show | probe } | log { show | clear | path } | update | version}"
   echo "  Details:"
   echo "    - configure          : same as configure all"
   echo "    - configure all      : configure all settings"
@@ -1001,6 +1113,7 @@ print_usage() {
   echo "    - cache install      : install the cache refresh (cron, every 6 hours)"
   echo "    - cache remove       : remove the cache refresh"
   echo "    - cache show         : show the offline cache"
+  echo "    - cache probe        : check which regions need the legacy token"
   echo "    - log show           : display the watchdog log"
   echo "    - log clear          : clear the watchdog log"
   echo "    - log path           : set a custom Directory Path for the log"
@@ -1083,6 +1196,7 @@ case "$1" in
   'install') cache_install ;;
   'remove') cache_remove ;;
   'show') cache_show ;;
+  'probe') legacy_probe && echo "Regions needing the legacy token: $(legacy_ids)" ;;
   *)
     echo "Unknown cache subcommand '$2'!"
     print_usage
