@@ -63,12 +63,42 @@ The script can install a watchdog that will check regularly the status and resta
 <br/> For that, just use `--watchdog` when using `start`or `restart`, or run the command `./pia_wg.sh watchdog install`
 <br/> To unsinstall/remove the watchdog, use `./pia_wg.sh watchdog remove`; when `./pia_wg.sh stop` is used, the watchdog is automatically removed
 
+## Offline cache (networks blocking PIA)
+Like the official PIA apps, the script talks to PIA through PIA servers by IP address (meta servers for the API, WireGuard servers for `addKey`), verifying their certificate against the PIA CA, and only falls back to the PIA domain names (`privateinternetaccess.com`, `piaproxy.net`, `serverlist.piaservers.net`, `<region>.pvt.site`) when that fails. This keeps it working on networks that block the PIA domains through DNS or SNI filtering.
+
+It also uses the PIA API v5 login of the official apps: the username/password is exchanged for a long lived API token, then a VPN token used to authenticate on the WireGuard servers. The legacy 24h token is still used as a fallback.
+
+The offline cache holds:
+  - `servers.json`: the PIA servers list
+  - `meta.list`: meta servers (IP and name) whose certificate is signed by the PIA CA
+  - `ca.rsa.4096.crt`: the PIA CA
+  - the tokens are stored in `/etc/config/pia_wg` with their expiry
+
+Commands:
+  - `./pia_wg.sh configure cache` sets the cache directory (default `/etc/pia_wg`), extra regions to take meta servers from, and whether meta servers with a certificate not signed by the PIA CA may be used (insecure, off by default)
+  - `./pia_wg.sh cache refresh` refreshes the servers list, the meta servers and renews the tokens ahead of expiry
+  - `./pia_wg.sh cache install` (or `--cache` with `start`/`restart`) installs a cron job running `cache refresh` every 6 hours; `./pia_wg.sh cache remove` removes it
+  - `./pia_wg.sh cache show` shows the cache
+
+When the VPN is up the router's own traffic goes through it, so the cron job keeps the cache and tokens fresh even where PIA is blocked. Before travelling to such a place, configure and start the VPN, and run `./pia_wg.sh cache refresh` while PIA is reachable so that the cache and tokens are fresh.
+
+To simulate DNS based blocking before travelling, make dnsmasq answer `0.0.0.0` for the PIA domains, then stop and start the VPN:
+```
+uci add_list dhcp.@dnsmasq[0].address='/privateinternetaccess.com/0.0.0.0'
+uci add_list dhcp.@dnsmasq[0].address='/piaproxy.net/0.0.0.0'
+uci add_list dhcp.@dnsmasq[0].address='/piaservers.net/0.0.0.0'
+uci add_list dhcp.@dnsmasq[0].address='/pvt.site/0.0.0.0'
+uci commit dhcp && /etc/init.d/dnsmasq restart
+```
+To also check that tokens can be obtained through meta servers, delete the stored VPN token first: `uci delete pia_wg.@vpntoken[0]; uci commit pia_wg`.
+<br/> Remove these entries (`uci del_list ...` with the same values) when done.
+
 ## Logging
 When the watchdog is enabled, the scripts log is located in `/var/log/pia_wg_watchdog.log`
 The log can be displayed using `pia_wg.sh log show` and cleared using `pia_wg_sh log clear`
 
 ## Usage
-Usage: `pia_wg.sh { configure <section> | start [ --watchdog ] | restart [ --watchdog ] | stop | status | watchdog { install | remove } | log { show | clear | path } | update | version}
+Usage: `pia_wg.sh { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | watchdog { install | remove } | cache { refresh | install | remove | show } | log { show | clear | path } | update | version}`
 <br/>  Details:
   - `configure`          : same as configure all
   - `configure all`      : configure all settings
@@ -76,16 +106,22 @@ Usage: `pia_wg.sh { configure <section> | start [ --watchdog ] | restart [ --wat
   - `configure dip`      : set PIA dedicated IP
   - `configure region`   : set/choose PIA region
   - `configure keys`     : generate local WireGuard keys
+  - `configure cache`    : set offline cache directory and options
   - `configure network`  : generate default network settings
   - `init-network`       : setup PIA WireGuard network (no start)
   - `start`              : start PIA WireGuard (if not already up)
   - `start --watchdog`   : same as start and install the watchdog
   - `restart`            : start or restart PIA WireGuard
   - `restart --watchdog` : same as restart and install the watchdog
+  - `start|restart --cache` : same and install the cache refresh
   - `stop`               : stop PIA WireGuard (and remove the watchdog)
   - `status`             : show PIA WireGuard status
   - `watchdog install`   : install the watchdog
   - `watchdog remove`    : remove the watchdog
+  - `cache refresh`      : refresh the offline cache (servers list, meta servers, tokens)
+  - `cache install`      : install the cache refresh (cron, every 6 hours)
+  - `cache remove`       : remove the cache refresh
+  - `cache show`         : show the offline cache
   - `log show`           : display the watchdog log
   - `log clear`          : clear the watchdog log
   - `log path`           : set a custom Directory Path for the log
