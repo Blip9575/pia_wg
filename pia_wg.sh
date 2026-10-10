@@ -513,6 +513,35 @@ EOS
   return 1
 }
 
+# Legacy (v2) tokens are valid for 24h
+legacy_token_ensure() {
+  LTS="$(uci -q get pia_wg.@token[0].timestamp)"
+  [ $(($(date +%s) - ${LTS:-0})) -lt 82800 ] || renew_piatoken
+}
+
+# Register our key with the VPN token. Some PIA servers still refuse the VPN
+# token (HTTP 401) and only accept the legacy one: renew the VPN token once
+# if it is not brand new, then fall back to the legacy token.
+pia_addkey_any() {
+  if [ "$PIAAUTH" = 'vpn' ]; then
+    pia_addkey && return 0
+    [ "$ADDKEYAUTHFAIL" ] || return 1
+    VTS="$(uci -q get pia_wg.@vpntoken[0].timestamp)"
+    if [ $(($(date +%s) - ${VTS:-0})) -gt 600 ]; then
+      echo "PIA server refused the VPN token; renewing it" >&3
+      pia_token_forget
+      pia_tokens && pia_addkey && return 0
+    fi
+    echo "PIA servers refused the VPN token; trying the legacy token" >&3
+    PIAAUTH='legacy'
+    legacy_token_ensure
+  fi
+  pia_addkey && return 0
+  [ "$ADDKEYAUTHFAIL" ] || return 1
+  renew_piatoken
+  pia_addkey
+}
+
 validate_dip() {
   DIPTOK="$(uci -q get pia_wg.@dip[0].token)" || return
   token_ok apitoken || pia_tokens >/dev/null 2>&1
@@ -766,18 +795,14 @@ set_netconf() {
       PIAAUTH='vpn'
     else
       echo "Could not get a PIA VPN token; trying the legacy token API" >&3
-      uci -q get pia_wg.@token[0] >/dev/null && [ $(($(date +%s) - $(uci get pia_wg.@token[0].timestamp))) -lt 86400 ] || renew_piatoken
+      legacy_token_ensure
       PIAAUTH='legacy'
     fi
   fi
   echo "Initializing network"
 
   if [ -z "$DIP_STATUS" ]; then
-    if ! pia_addkey && [ "$ADDKEYAUTHFAIL" ] && [ "$PIAAUTH" = 'vpn' ]; then
-      echo "PIA server refused the VPN token; renewing it" >&3
-      pia_token_forget
-      pia_tokens && pia_addkey
-    fi
+    pia_addkey_any
   else
     PIAADDKEY="$(curl -s -k -G --connect-to "$(uci -q get pia_wg.@dip[0].cn)::$(uci -q get pia_wg.@dip[0].ip)" --user "dedicated_ip_$(uci -q get pia_wg.@dip[0].token):$(uci -q get pia_wg.@dip[0].ip)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@dip[0].cn):1337/addKey")"
   fi
