@@ -458,10 +458,15 @@ set_cache() {
 # Regions whose WireGuard servers refuse the VPN token (HTTP 401 on addKey) and
 # only accept the legacy 24h token. addKey is called with a deliberately invalid
 # public key: a server that accepts the token answers 409 (invalid key) and
-# registers nothing, one that refuses it answers 401. The first server of each
+# registers no key, one that refuses it answers 401. The first server of each
 # online region is asked, then the others if it refuses; a region is listed (in
 # $CACHE/legacy.list, after a '# <epoch>' line) only if all the servers that
 # answered refused.
+#
+# A server removes the existing peer of the token making an addKey request
+# before it checks the key, even when the request then fails. The server the
+# tunnel is connected to is therefore never asked (it would drop the tunnel);
+# a region is judged on its other servers, or keeps its previous result.
 legacy_probe() {
   CD="$(cache_dir)"
   [ -s "$CD/servers.json" ] || {
@@ -474,6 +479,8 @@ legacy_probe() {
   }
   # PIA servers do not accept addKey from inside a PIA tunnel
   pia_wan
+  # The servers the tunnel is connected to
+  LIVEIPS=" $(wg show "$PIAWG_IF" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}' | tr '\n' ' ') $(uci -q get "network.$PIAWG_PEER.endpoint_host") "
   echo "Checking the regions (leaving via ${WANDEV:-the default route}); this takes a few minutes" >&3
   CA="$(pia_ca)"
   LU="$(uci -q get pia_wg.@vpntoken[0].user)"
@@ -491,7 +498,14 @@ legacy_probe() {
         kill -0 "$MAINPID" 2>/dev/null || exit 1
         REF=0
         TRY=0
+        SKIPPED=0
         for SRV in $SRVS; do
+          case "$LIVEIPS" in
+          *" ${SRV%%,*} "*)
+            SKIPPED=1
+            continue
+            ;;
+          esac
           # Some servers answer differently from one request to the next: a
           # server counts as refusing only if it refuses twice in a row
           VERDICT=''
@@ -523,7 +537,12 @@ legacy_probe() {
             ;;
           esac
         done
-        [ $TRY -gt 0 ] && [ $REF -eq $TRY ] && echo "$RID" >>"$CD/legacy.list.tmp"
+        if [ $TRY -gt 0 ]; then
+          [ $REF -eq $TRY ] && echo "$RID" >>"$CD/legacy.list.tmp"
+        elif [ $SKIPPED -eq 1 ] && grep -qx "$RID" "$CD/legacy.list" 2>/dev/null; then
+          # only the tunnel's server could have been asked: keep what we knew
+          echo "$RID" >>"$CD/legacy.list.tmp"
+        fi
         printf '.' >&3
       done
   } &
