@@ -191,6 +191,10 @@ cache_refresh() {
   cache_refresh_list
   R=$?
   meta_refresh || R=1
+  # Renew PIA tokens ahead of expiry (through the tunnel when it is up)
+  if uci -q get pia_wg.@user[0] >/dev/null; then
+    pia_tokens renew || R=1
+  fi
   return $R
 }
 
@@ -308,13 +312,164 @@ set_piauser() {
 EOI
 }
 
+# pia_api <meta path> <subdomain> <domain path> [curl args…]
+# Call the PIA API the way the official apps do: through cached meta servers
+# by IP (certificate verified against the PIA CA), then unverified meta servers
+# if pia_wg.@cache[0].insecure_meta is set, then privateinternetaccess.com and
+# piaproxy.net. The response body is left in $PIARESP.
+# Returns 0 on HTTP 2xx, 1 on HTTP 401 (bad credentials/token), 2 otherwise.
+PIARESP="/tmp/pia_wg_api.resp"
+pia_api() {
+  MPATH="$1"
+  SUB="$2"
+  DPATH="$3"
+  shift 3
+  CA="$(pia_ca)"
+  CD="$(cache_dir)"
+  EPS="$(awk '{print $1, $2, "pin"}' "$CD/meta.list" 2>/dev/null)"
+  [ "$(uci -q get pia_wg.@cache[0].insecure_meta)" = '1' ] &&
+    EPS="$EPS
+$(meta_candidates | head -n "$META_PROBES" | awk '{print $1, $2, "insecure"}')"
+  EPS="$EPS
+privateinternetaccess.com - domain
+piaproxy.net - domain"
+  while read -r EP CN MODE; do
+    case "$MODE" in
+    'pin') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 --cacert "$CA" --connect-to "$CN::$EP:443" "$@" "https://$CN$MPATH")" ;;
+    'insecure') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 --connect-to "$CN::$EP:443" "$@" "https://$CN$MPATH")" ;;
+    'domain') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 "$@" "https://$SUB.$EP$DPATH")" ;;
+    *) continue ;;
+    esac
+    case "$CODE" in
+    2??) return 0 ;;
+    401) return 1 ;;
+    esac
+  done <<EOE
+$EPS
+EOE
+  : >"$PIARESP"
+  return 2
+}
+
+# ISO 8601 date (as returned by the PIA API) to epoch; 0 if unknown
+iso2epoch() {
+  printf '"%s"' "$1" | jq -r 'try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) catch 0'
+}
+
+# token_ok <section> [renew]: is the stored token in pia_wg.@<section>[0]
+# still usable (default) or still fresh (renew: before half of its life, at
+# most 21 days before expiry, as the official apps do)
+token_ok() {
+  uci -q get "pia_wg.@$1[0]" >/dev/null || return 1
+  EXP="$(uci -q get "pia_wg.@$1[0].expires")"
+  TS="$(uci -q get "pia_wg.@$1[0].timestamp")"
+  EXP="${EXP:-0}"
+  TS="${TS:-0}"
+  NOW="$(date +%s)"
+  if [ "$EXP" -gt 0 ]; then
+    MARGIN=60
+    if [ "$2" = 'renew' ]; then
+      MARGIN=$(((EXP - TS) / 2))
+      [ $MARGIN -gt 1814400 ] && MARGIN=1814400
+    fi
+    [ $((EXP - NOW)) -gt $MARGIN ]
+  else
+    [ "$2" = 'renew' ] && MAXAGE=43200 || MAXAGE=86400
+    [ $((NOW - TS)) -lt "$MAXAGE" ]
+  fi
+}
+
+store_apitoken() {
+  APITOK="$(jq -r '.api_token // empty' "$PIARESP" 2>/dev/null)"
+  [ "$APITOK" ] || return 1
+  uci -q batch <<EOI >/dev/null
+    delete pia_wg.@apitoken[0]
+    add pia_wg apitoken
+    set pia_wg.@apitoken[0].token="$APITOK"
+    set pia_wg.@apitoken[0].expires="$(iso2epoch "$(jq -r '.expires_at // empty' "$PIARESP")")"
+    set pia_wg.@apitoken[0].timestamp="$(date +%s)"
+    commit pia_wg
+EOI
+}
+
+# PIA API v5 login (username/password -> long lived API token)
+api_login() {
+  echo "Logging in to PIA" >&3
+  uci -q get pia_wg.@user[0] >/dev/null || {
+    [ "$AUTO" ] && return 1 || set_piauser
+  }
+  pia_api /api/client/v5/api_token apiv5 /api/client/v5/api_token \
+    --data-urlencode "username=$(uci -q get pia_wg.@user[0].id)" \
+    --data-urlencode "password=$(uci -q get pia_wg.@user[0].password)"
+  case $? in
+  0) store_apitoken && return 0 ;;
+  1) echo "PIA login refused; check your PIA username and password" >&3 ;;
+  esac
+  echo "Error: PIA login failed!" >&3
+  return 1
+}
+
+# PIA API v5: renew the API token with itself
+api_token_refresh() {
+  echo "Renewing PIA API token" >&3
+  pia_api /api/client/v5/refresh apiv5 /api/client/v5/refresh -d "" \
+    --header "Authorization: Token $(uci -q get pia_wg.@apitoken[0].token)" &&
+    store_apitoken
+}
+
+# PIA API v5: API token -> VPN token (used to authenticate on VPN servers)
+vpn_token_get() {
+  echo "Renewing PIA VPN token" >&3
+  pia_api /api/client/v5/vpn_token apiv5 /api/client/v5/vpn_token -d "" \
+    --header "Authorization: Token $(uci -q get pia_wg.@apitoken[0].token)" || return
+  VPNS1="$(jq -r '.vpn_secret1 // empty' "$PIARESP" 2>/dev/null)"
+  VPNS2="$(jq -r '.vpn_secret2 // empty' "$PIARESP" 2>/dev/null)"
+  [ "$VPNS1" ] && [ "$VPNS2" ] || return 2
+  uci -q batch <<EOI >/dev/null
+    delete pia_wg.@vpntoken[0]
+    add pia_wg vpntoken
+    set pia_wg.@vpntoken[0].user="vpn_token_$VPNS1"
+    set pia_wg.@vpntoken[0].pass="$VPNS2"
+    set pia_wg.@vpntoken[0].expires="$(iso2epoch "$(jq -r '.expires_at // empty' "$PIARESP")")"
+    set pia_wg.@vpntoken[0].timestamp="$(date +%s)"
+    commit pia_wg
+EOI
+}
+
+# pia_tokens [renew]: make sure a usable (or with renew: fresh) VPN token is stored
+pia_tokens() {
+  if ! token_ok apitoken "$1"; then
+    if token_ok apitoken; then
+      api_token_refresh || api_login || return 1
+    else
+      api_login || return 1
+    fi
+  fi
+  token_ok vpntoken "$1" && return 0
+  vpn_token_get
+  case $? in
+  0) return 0 ;;
+  1) api_login && vpn_token_get ;; # API token refused: log in again
+  *) return 1 ;;
+  esac
+}
+
 validate_dip() {
   DIPTOK="$(uci -q get pia_wg.@dip[0].token)" || return
+  token_ok apitoken || pia_tokens >/dev/null 2>&1
   # Try to fetch DIP info from API
-  DIPR="$(curl -s -L -X POST 'https://www.privateinternetaccess.com/api/client/v2/dedicated_ip' \
-    --header 'Content-Type: application/json' \
-    --header "Authorization: Token $(uci -q get pia_wg.@token[0].hash)" \
-    -d '{ "tokens":["'"$DIPTOK"'"] }' | jq 'select(.[0]) | .[0]')"
+  if uci -q get pia_wg.@apitoken[0].token >/dev/null; then
+    pia_api /api/client/v5/dedicated_ip apiv5 /api/client/v5/dedicated_ip -X POST \
+      --header 'Content-Type: application/json' \
+      --header "Authorization: Token $(uci -q get pia_wg.@apitoken[0].token)" \
+      -d '{ "tokens":["'"$DIPTOK"'"] }'
+  else
+    pia_api /apiv2/dedicated_ip apiv2 /api/client/v2/dedicated_ip -X POST \
+      --header 'Content-Type: application/json' \
+      --header "Authorization: Token $(uci -q get pia_wg.@token[0].hash)" \
+      -d '{ "tokens":["'"$DIPTOK"'"] }'
+  fi
+  DIPR="$(jq 'select(.[0]) | .[0]' "$PIARESP" 2>/dev/null)"
   # Extract status - if empty, API call failed (likely network down during restart)
   DIP_STATUS_NEW="$(echo "$DIPR" | jq -r 'select(.status) | .status')"
   if [ -z "$DIP_STATUS_NEW" ]; then
@@ -396,14 +551,19 @@ generate_wgkeys() {
 EOI
 }
 
+# Legacy PIA API v2 token (24h), used if the v5 API fails
 renew_piatoken() {
-  echo "Renewing PIA token" >&3
+  echo "Renewing PIA legacy token" >&3
   uci -q get pia_wg.@user[0] >/dev/null || set_piauser
 
-  if ! PIARESPONSE="$(curl -s --data-urlencode "username=$(uci -q get pia_wg.@user[0].id)" --data-urlencode "password=$(uci -q get pia_wg.@user[0].password)" https://www.privateinternetaccess.com/api/client/v2/token)"; then
+  pia_api /apiv2/token apiv2 /api/client/v2/token \
+    --data-urlencode "username=$(uci -q get pia_wg.@user[0].id)" \
+    --data-urlencode "password=$(uci -q get pia_wg.@user[0].password)"
+  if [ $? -eq 2 ]; then
     echo "Error: Failed to connect to PIA authentication server!" >&3
     exit 1
   fi
+  PIARESPONSE="$(cat "$PIARESP")"
 
   # Check if response is empty
   if [ -z "$PIARESPONSE" ]; then
@@ -511,12 +671,24 @@ set_netconf() {
     echo "Configuration is incomplete; exiting!" >&3
     exit 1
   }
-  uci -q get pia_wg.@token[0] >/dev/null && [ $(($(date +%s) - $(uci get pia_wg.@token[0].timestamp))) -lt 86400 ] || renew_piatoken
-  echo "Initializing network"
-
   # if no DIP (DIP_STATUS is set from check_conf)
   if [ -z "$DIP_STATUS" ]; then
-    PIAADDKEY="$(curl -s -k -G --data-urlencode "pt=$(uci -q get pia_wg.@token[0].hash)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@region[0].dns):1337/addKey")"
+    if pia_tokens; then
+      PIAAUTH='vpn'
+    else
+      echo "Could not get a PIA VPN token; trying the legacy token API" >&3
+      uci -q get pia_wg.@token[0] >/dev/null && [ $(($(date +%s) - $(uci get pia_wg.@token[0].timestamp))) -lt 86400 ] || renew_piatoken
+      PIAAUTH='legacy'
+    fi
+  fi
+  echo "Initializing network"
+
+  if [ -z "$DIP_STATUS" ]; then
+    if [ "$PIAAUTH" = 'vpn' ]; then
+      PIAADDKEY="$(curl -s -k -G --user "$(uci -q get pia_wg.@vpntoken[0].user):$(uci -q get pia_wg.@vpntoken[0].pass)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@region[0].dns):1337/addKey")"
+    else
+      PIAADDKEY="$(curl -s -k -G --data-urlencode "pt=$(uci -q get pia_wg.@token[0].hash)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@region[0].dns):1337/addKey")"
+    fi
   else
     PIAADDKEY="$(curl -s -k -G --connect-to "$(uci -q get pia_wg.@dip[0].cn)::$(uci -q get pia_wg.@dip[0].ip)" --user "dedicated_ip_$(uci -q get pia_wg.@dip[0].token):$(uci -q get pia_wg.@dip[0].ip)" --data-urlencode "pubkey=$(uci -q get pia_wg.@keys[0].pub)" "https://$(uci -q get pia_wg.@dip[0].cn):1337/addKey")"
   fi
@@ -702,7 +874,7 @@ print_usage() {
   echo "    - status             : show PIA WireGuard status"
   echo "    - watchdog install   : install the watchdog"
   echo "    - watchdog remove    : remove the watchdog"
-  echo "    - cache refresh      : refresh the offline cache (servers list, meta servers)"
+  echo "    - cache refresh      : refresh the offline cache (servers list, meta servers, tokens)"
   echo "    - cache install      : install the cache refresh (cron, every 6 hours)"
   echo "    - cache remove       : remove the cache refresh"
   echo "    - cache show         : show the offline cache"
