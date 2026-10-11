@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.4.0
+# Version: 1.4.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1966,15 +1966,20 @@ persist_batch() {
   fi
   echo "set network.$PIAWG_PEER=${PIAPROTO}_${PIAWG_IF}"
   echo "set network.$PIAWG_PEER.description='PIA $(uci -q get "pia.$PIAWG_IF.region_name" | tr -d "'")'"
+  # the form of LuCI's own save (the Network pages): dns is a list, multipath is
+  # set and a defaultroute of 1 (the default) is left out, so that saving the
+  # interface there does not list changes
+  echo "set network.$PIAWG_IF.multipath=off"
   # the interface's iface_* options go to the network interface, peer_* to the peer
-  uci export pia | awk -v qn="'$PIAWG_IF'" -v ni="network.$PIAWG_IF" -v np="network.$PIAWG_PEER" '
+  uci export pia | awk -v qn="'$PIAWG_IF'" -v one="'1'" -v ni="network.$PIAWG_IF" -v np="network.$PIAWG_PEER" '
     $1=="config"{d=($2=="interface" && $3==qn); next}
     d && ($1=="option" || $1=="list"){
       k=$2
       if (k ~ /^iface_/) { sub(/^iface_/, "", k); t=ni }
       else if (k ~ /^peer_/) { sub(/^peer_/, "", k); t=np }
       else next
-      printf("%s %s.%s=%s\n", ($1=="option" ? "set" : "add_list"), t, k, $3)
+      if (t==ni && k=="defaultroute" && $3==one) next
+      printf("%s %s.%s=%s\n", ($1=="option" && !(t==ni && k=="dns") ? "set" : "add_list"), t, k, $3)
     }'
 
 }
