@@ -30,7 +30,7 @@ For a typical setup (direct all LAN traffic to/from internet through the newly c
 - Navigate to Network > Firewall
 - Create a new Zone, name it PIA or whatever you want
 - In the General Settings tab, enable **Masquerading** and **MSS Clamping**, then add **LAN** to **Allow forward from source zones**
-- In the Advanced Settings tab, set **Covered Devices** to **wg_pia**
+- In the Advanced Settings tab, set **Covered Devices** to **pia** (or the name of the interface)
 - Save the zone
 - Now edit your zone starting with **LAN**
 - Set **Allow forward to destination zones** to **PIA** or whatever you named the previously created zone

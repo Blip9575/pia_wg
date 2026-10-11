@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.33
+# Version: 1.0.34
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -42,7 +42,7 @@ PIA_KEEPALIVE=25          # the official apps' PersistentKeepalive
 # AmneziaWG obfuscation used when the server sends none (as the official app)
 PIA_AWG_DEFAULTS='jc=5 jmin=25 jmax=100 s1=5 s2=3 h1=1234567891 h2=1234567892 h3=1234567893 h4=1234567894'
 UCISTAGEDIR='/tmp/.uci'               # where uci keeps the RAM-staged (uncommitted) changes
-PIAWG_IF='wg_pia'                     # the interface being handled (-i NAME, or the only one configured)
+PIAWG_IF='pia'                        # the interface being handled (-i NAME, or the only one configured)
 CACHEDEFDIR='/mnt/usb/pia'            # external storage, to spare the router flash
 CACHERAMDIR="$RUNDIR/cache"           # used when the external storage is not mounted
 SERVERLIST_PATH='/vpninfo/servers/v7' # the Android app's list: it also has the AmneziaWG servers

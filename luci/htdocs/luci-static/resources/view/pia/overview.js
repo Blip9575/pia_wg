@@ -406,7 +406,7 @@ return view.extend({
 		const others = st.interfaces;
 		const taken = others.some(i => i.default_route);
 		const d = {
-			name: '', proto: st.awg ? 'amneziawg' : 'wireguard', dns: 'standard', mtu: 'std',
+			name: others.some(i => i.name == 'pia') ? '' : 'pia', proto: st.awg ? 'amneziawg' : 'wireguard', dns: 'standard', mtu: 'std',
 			route: !taken, firewall: true, forward: st.lan_zone ? [ st.lan_zone ] : [], strict: true
 		};
 		let picker = null;
@@ -419,7 +419,7 @@ return view.extend({
 				title: _('Name'),
 				render: () => {
 					const inp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': d.name, 'maxlength': 15,
-						'placeholder': 'vpn_pia', 'spellcheck': 'false' });
+						'placeholder': 'pia', 'spellcheck': 'false' });
 					return { node: field(_('Interface name'), inp, _('Letters, digits and underscore (up to 15). It is also the name of the network interface and of its firewall zone.')),
 						collect: () => {
 							d.name = inp.value.trim();
