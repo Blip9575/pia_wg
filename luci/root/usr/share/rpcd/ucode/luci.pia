@@ -1,0 +1,166 @@
+// rpcd plugin of the PIA VPN LuCI app: a thin layer over 'pia.sh api …'
+// (JSON on stdout), which does the real work.
+
+'use strict';
+
+import { popen, open, unlink, readfile } from 'fs';
+
+const PIA = '/usr/bin/pia.sh';
+
+function shellquote(s) {
+	return `'${replace(s ?? '', "'", "'\\''")}'`;
+}
+
+// Run pia.sh with the arguments; the JSON it prints (its last line) is returned
+function run(args, input) {
+	let cmd = PIA, tmp;
+
+	for (let a in args)
+		cmd += ' ' + shellquote(a);
+
+	if (input != null) {
+		tmp = '/var/run/pia-input.' + trim(readfile('/proc/sys/kernel/random/uuid') ?? time());
+		let fd = open(tmp, 'w', 0600);
+		if (!fd)
+			return { ok: false, error: 'Cannot write a temporary file' };
+		fd.write(input);
+		fd.close();
+		cmd += ' <' + shellquote(tmp);
+	}
+	else {
+		cmd += ' </dev/null';
+	}
+
+	let p = popen(cmd + ' 2>/dev/null'), out = '';
+
+	if (p) {
+		out = p.read('all');
+		p.close();
+	}
+
+	if (tmp)
+		unlink(tmp);
+
+	let lines = split(trim(out ?? ''), '\n');
+	let res = json(lines[length(lines) - 1] ?? '');
+
+	return res ?? { ok: false, error: 'No answer from ' + PIA };
+}
+
+function okname(s) {
+	return match(s, /^[A-Za-z0-9_]{1,15}$/) ? true : false;
+}
+
+const methods = {
+	status: {
+		call: function() {
+			return run([ 'api', 'status' ]);
+		}
+	},
+
+	regions: {
+		args: { proto: 'proto' },
+		call: function(request) {
+			let proto = request.args.proto == 'wireguard' ? 'wireguard' : 'amneziawg';
+			let p = popen(PIA + ' api regions ' + proto + ' 2>/dev/null');
+			let out = p ? p.read('all') : '';
+			if (p) p.close();
+			let list = json(trim(out ?? ''));
+			if (type(list) == 'array')
+				return { ok: true, regions: list };
+			return list ?? { ok: false, error: 'No answer from ' + PIA };
+		}
+	},
+
+	account: {
+		args: { id: 'id', password: 'password' },
+		call: function(request) {
+			let id = request.args.id, pw = request.args.password;
+			if (!id || !pw || match(id, /[\r\n]/) || match(pw, /[\r\n]/))
+				return { ok: false, error: 'User id and password are both needed' };
+			return run([ 'api', 'account' ], id + '\n' + pw + '\n');
+		}
+	},
+
+	// start | stop | restart | renew of an interface (a background job)
+	action: {
+		args: { name: 'name', op: 'op' },
+		call: function(request) {
+			let name = request.args.name, op = request.args.op;
+			if (!okname(name))
+				return { ok: false, error: 'Invalid interface name' };
+			let cmd = { start: 'start', stop: 'stop', restart: 'restart', renew: 'renew --force' }[op];
+			if (!cmd)
+				return { ok: false, error: 'Unknown action' };
+			return run([ 'api', 'job', name, '-i', name, ...split(cmd, ' ') ]);
+		}
+	},
+
+	// login | refresh_list | refresh_cache (a background job)
+	global_action: {
+		args: { op: 'op' },
+		call: function(request) {
+			let cmd = {
+				login: [ 'api', 'login' ],
+				refresh_list: [ 'api', 'refresh-list' ],
+				refresh_cache: [ 'cache', 'refresh' ]
+			}[request.args.op];
+			if (!cmd)
+				return { ok: false, error: 'Unknown action' };
+			return run([ 'api', 'job', '_global', ...cmd ]);
+		}
+	},
+
+	job_status: {
+		args: { name: 'name' },
+		call: function(request) {
+			let name = request.args.name ?? '_global';
+			if (name != '_global' && !okname(name))
+				return { ok: false, error: 'Invalid interface name' };
+			let p = popen(PIA + ' api job-status ' + shellquote(name) + ' 2>/dev/null');
+			let out = p ? p.read('all') : '';
+			if (p) p.close();
+			return { job: json(trim(out ?? '')) };
+		}
+	},
+
+	save: {
+		args: {
+			name: 'name', proto: 'proto', region: 'region', fast: 'fast', dns: 'dns',
+			mtu: 'mtu', route: 'route', firewall: 'firewall', forward: 'forward', strict: 'strict'
+		},
+		call: function(request) {
+			let a = request.args;
+			if (!okname(a.name))
+				return { ok: false, error: 'Invalid interface name' };
+			let args = [ 'api', 'iface-save', a.name ];
+			for (let k in [ 'proto', 'region', 'fast', 'dns', 'mtu', 'route', 'firewall', 'forward', 'strict' ])
+				if (a[k] != null)
+					push(args, k + '=' + a[k]);
+			return run(args);
+		}
+	},
+
+	remove: {
+		args: { name: 'name' },
+		call: function(request) {
+			if (!okname(request.args.name))
+				return { ok: false, error: 'Invalid interface name' };
+			return run([ 'api', 'iface-remove', request.args.name ]);
+		}
+	},
+
+	log: {
+		args: { lines: 0 },
+		call: function(request) {
+			let n = +request.args.lines || 60;
+			if (n < 1 || n > 500) n = 60;
+			let p = popen(PIA + ' api log ' + n + ' 2>/dev/null');
+			let out = p ? p.read('all') : '';
+			if (p) p.close();
+			return { log: out ?? '' };
+		}
+	}
+};
+
+return { 'luci.pia': methods };

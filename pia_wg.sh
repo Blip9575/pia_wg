@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.1.9
+# Version: 1.2.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -686,6 +686,20 @@ region_names() {
     .id as \$id | .name + (if (\$l | split(\" \") | any(.[]; . == \$id)) then \" (L)\" else \"\" end)" | nl -v0
 }
 
+# Store the region $PIAREGIONID of the list $PIAREGIONS in the interface
+store_region() {
+  PIAREGIONNAME="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .name")"
+  PIAREGIONDNS="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .dns")"
+  uci -q batch <<EOI >/dev/null
+    set pia.$PIAWG_IF=interface
+    set pia.$PIAWG_IF.region_id="$PIAREGIONID"
+    set pia.$PIAWG_IF.region_name="$PIAREGIONNAME"
+    set pia.$PIAWG_IF.region_dns="$PIAREGIONDNS"
+    set pia.$PIAWG_IF.region_country="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .country")"
+    commit pia
+EOI
+}
+
 select_region() {
   echo "Fetching latest PIA servers list…"
   if cache_refresh_list; then
@@ -746,17 +760,8 @@ select_region() {
       echo "Invalid region number: '$AND'"
     done
   fi
-  PIAREGIONNAME="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .name")"
-  PIAREGIONDNS="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .dns")"
+  store_region
   echo "Region selected: $PIAREGIONNAME"
-  uci -q batch <<EOI >/dev/null
-    set pia.$PIAWG_IF=interface
-    set pia.$PIAWG_IF.region_id="$PIAREGIONID"
-    set pia.$PIAWG_IF.region_name="$PIAREGIONNAME"
-    set pia.$PIAWG_IF.region_dns="$PIAREGIONDNS"
-    set pia.$PIAWG_IF.region_country="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .country")"
-    commit pia
-EOI
   # the fastest region of the country, picked at each start
   uci -q delete "pia.$PIAWG_IF.region_fast"
   if [ -z "$AUTO" ] && read_yn "Pick the fastest region of that country at each start" n; then
@@ -2566,6 +2571,64 @@ script_update() {
   echo "Done"
 }
 
+# ---- LuCI app (luci/ of the repository): Services > PIA VPN
+
+LUCI_FILES='htdocs/luci-static/resources/view/pia/overview.js:/www/luci-static/resources/view/pia/overview.js
+root/usr/share/luci/menu.d/luci-app-pia.json:/usr/share/luci/menu.d/luci-app-pia.json
+root/usr/share/rpcd/acl.d/luci-app-pia.json:/usr/share/rpcd/acl.d/luci-app-pia.json
+root/usr/share/rpcd/ucode/luci.pia:/usr/share/rpcd/ucode/luci.pia'
+
+luci_reload() {
+  rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache 2>/dev/null
+  /etc/init.d/rpcd restart >/dev/null 2>&1
+}
+
+# Install the web interface: from the luci/ directory next to the script if
+# there is one, else downloaded from the repository the script comes from
+luci_install() {
+  LIBASE="${SCRIPTDL%/*}/luci"
+  LILOCAL="${SCRIPTPATH%/*}/luci"
+  LITMP="$RUNDIR/luci.$$"
+  mkdir -p "$LITMP"
+  LIN=0
+  for LIX in $LUCI_FILES; do
+    LISRC="${LIX%%:*}"
+    LIN=$((LIN + 1))
+    if [ -f "$LILOCAL/$LISRC" ]; then
+      cp "$LILOCAL/$LISRC" "$LITMP/$LIN"
+    else
+      curl -sfL --max-time 30 -o "$LITMP/$LIN" "$LIBASE/$LISRC" || {
+        echo "Failed to download $LISRC" >&2
+        rm -rf "$LITMP"
+        exit 1
+      }
+    fi
+    # a page of the web server, an error message or an empty file is no app file
+    if [ ! -s "$LITMP/$LIN" ] || head -c 64 "$LITMP/$LIN" | grep -q -i '<html\|<!doctype\|404'; then
+      echo "$LISRC is not valid" >&2
+      rm -rf "$LITMP"
+      exit 1
+    fi
+  done
+  LIN=0
+  for LIX in $LUCI_FILES; do
+    LIN=$((LIN + 1))
+    LIDST="${LIX#*:}"
+    mkdir -p "${LIDST%/*}"
+    sed "s|/usr/bin/pia.sh|$SCRIPTPATH|g" "$LITMP/$LIN" >"$LIDST"
+  done
+  rm -rf "$LITMP"
+  luci_reload
+  echo "LuCI app installed: Services > PIA VPN (log in to LuCI again)"
+}
+
+luci_remove() {
+  for LIX in $LUCI_FILES; do rm -f "${LIX#*:}"; done
+  rmdir /www/luci-static/resources/view/pia 2>/dev/null
+  luci_reload
+  echo "LuCI app removed"
+}
+
 # Install the cron jobs requested with --watchdog and/or --cache
 install_jobs() {
   shift
@@ -2621,8 +2684,381 @@ print_usage() {
   echo "    - log show           : display the log"
   echo "    - log clear          : clear the log"
   echo "    - log path           : set a custom Directory Path for the log"
+  echo "    - luci install       : install the LuCI web interface (Services > PIA VPN); luci remove removes it"
   echo "    - update             : update the script to latest version"
   echo "    - version            : print the version and exit"
+}
+
+# ---- api: machine readable commands (JSON on stdout) for the LuCI app
+# (luci-app-pia talks to them through /usr/libexec/rpcd/pia). Nothing is asked.
+
+api_fail() {
+  jq -nc --arg e "$1" '{ok: false, error: $e}'
+  exit 0
+}
+
+api_ok() { echo '{"ok":true}'; }
+
+# The state of the job started by 'api job' ($1: the interface or _global)
+api_job_json() {
+  AJS="$RUNDIR/job.$1"
+  if [ -s "$AJS" ]; then
+    read -r AJST AJRC AJTS AJCMD <"$AJS"
+    if [ "$AJST" = 'running' ] && [ "$AJRC" -gt 0 ] && ! kill -0 "$AJRC" 2>/dev/null; then
+      AJST='died'
+    fi
+    jq -nc --arg s "$AJST" --arg c "$AJCMD" --arg t "$AJTS" --arg rc "$AJRC" --rawfile o "$AJS.out" \
+      '{state: $s, cmd: $c, since: ($t | tonumber? // 0), rc: (if $s == "done" then ($rc | tonumber? // null) else null end),
+        output: ($o | split("\n") | map(select(. != "")) | .[-12:])}' 2>/dev/null ||
+      echo null
+  else
+    echo null
+  fi
+}
+
+# One interface of the config as JSON
+api_iface_json() {
+  PIAWG_IF="$1"
+  set_ifvars
+  AIUP=false
+  AIHS=''
+  AIEP=''
+  if wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
+    AIUP=true
+    AIHS="$(handshake_age)"
+    AIEP="$(wgt "$PIAWG_IF" show "$PIAWG_IF" endpoints 2>/dev/null | awk '{print $2; exit}')"
+  fi
+  AIDR=0
+  has_default_route "$PIAWG_IF" && AIDR=1
+  AIAUTO=0
+  proto_is_auto "$PIAWG_IF" && AIAUTO=1
+  jq -nc --arg name "$PIAWG_IF" \
+    --arg rid "$(uci -q get "pia.$PIAWG_IF.region_id")" \
+    --arg rname "$(uci -q get "pia.$PIAWG_IF.region_name")" \
+    --arg rcountry "$(uci -q get "pia.$PIAWG_IF.region_country")" \
+    --arg fast "$(uci -q get "pia.$PIAWG_IF.region_fast")" \
+    --arg proto "$PIAPROTO" --argjson auto "$AIAUTO" \
+    --arg dns "$(uci -q get "pia.$PIAWG_IF.iface_dns")" \
+    --arg mace "$PIA_MACE_DNS" \
+    --arg mtu "$(uci -q get "pia.$PIAWG_IF.iface_mtu")" \
+    --argjson route "$AIDR" \
+    --arg fw "$(uci -q get "pia.$PIAWG_IF.fw_zone")" \
+    --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
+    --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
+    --argjson up "$AIUP" --arg hs "$AIHS" --arg ep "$AIEP" \
+    --argjson job "$(api_job_json "$PIAWG_IF")" \
+    '{name: $name,
+      region: {id: $rid, name: $rname, country: $rcountry},
+      fast: ($fast == "1"), proto: $proto, auto: ($auto == 1),
+      dns: (if $dns == "" then "standard" elif $dns == $mace then "mace" else $dns end),
+      mtu: ($mtu | tonumber? // null), default_route: ($route == 1),
+      firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
+      dip: ($dip != ""), up: $up, handshake: ($hs | tonumber? // null),
+      endpoint: ($ep | if . == "" then null else . end), job: $job}'
+}
+
+api_status() {
+  AZONES="$(uci -q show firewall | sed -n "s/^firewall\\.[^.]*\\.name='\\([^']*\\)'\$/\\1/p" | tr '\n' ' ')"
+  ASERV="$(cache_dir)/servers.json"
+  ASN=0
+  ASTS=0
+  if [ -s "$ASERV" ]; then
+    ASN="$(jq '.regions | length' "$ASERV" 2>/dev/null)"
+    ASTS="$(date -r "$ASERV" +%s 2>/dev/null)"
+  fi
+  AAWG=0
+  awg_available && AAWG=1
+  {
+    for AX in $(iface_list); do api_iface_json "$AX"; done
+  } | jq -sc --arg version "$CURVERS" --argjson awg "$AAWG" \
+    --arg id "$(uci -q get pia.account.id)" --arg pw "$(uci -q get pia.account.password)" \
+    --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
+    --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg stdmtu "$(std_mtu)" \
+    --arg small "$PIA_MTU_SMALL" --arg mace "$PIA_MACE_DNS" \
+    --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" \
+    --argjson job "$(api_job_json _global)" \
+    '{version: $version, awg: ($awg == 1),
+      account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
+      zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan,
+      std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), mace_dns: $mace,
+      cache: {regions: $regions, updated: ($listts | tonumber? // 0)},
+      job: $job, now: (now | floor), interfaces: .}'
+}
+
+# api_regions <wireguard|amneziawg>: the regions that have servers of that protocol
+api_regions() {
+  case "$1" in
+  amneziawg) ARG='awg' ;;
+  *) ARG='wg' ;;
+  esac
+  ASERV="$(cache_dir)/servers.json"
+  [ -s "$ASERV" ] || api_fail "No servers list: refresh it first"
+  jq -c --arg g "$ARG" --arg l "$(legacy_ids)" '
+    [.regions[] | select(.offline == false) | select(.servers[$g]) | .id as $i |
+     {id, name, country, dns, port_forward, geo,
+      streaming: ((.name | contains("Streaming")) or (.dns | contains("-so."))),
+      legacy: (($g == "wg") and (($l | split(" ")) | index($i) != null))}] | sort_by(.name)' \
+    "$ASERV" 2>/dev/null || api_fail "The servers list is unreadable"
+}
+
+# api_account: the user id on the first line of the input, the password on the second
+api_account() {
+  read -r AAID
+  read -r AAPW
+  [ -n "$AAID" ] && [ -n "$AAPW" ] || api_fail "User id and password are both needed"
+  uci -q set pia.account=account
+  uci -q set "pia.account.id=$AAID"
+  uci -q set "pia.account.password=$AAPW"
+  uci -q commit pia
+  api_ok
+}
+
+# api_login: log in with the stored account (fresh tokens)
+api_login() {
+  uci -q get pia.account.id >/dev/null || api_fail "No account is configured"
+  uci -q delete pia.apitoken
+  uci -q delete pia.vpntoken
+  uci -q commit pia
+  if pia_tokens renew; then api_ok; else api_fail "PIA login failed: check the user id and the password"; fi
+}
+
+# api_job <key> <script arguments…>: run the script in the background, state in
+# $RUNDIR/job.<key> (running|done <pid|rc> <epoch> <command>), output in .out
+api_job() {
+  AJK="$1"
+  shift
+  case "$AJK" in
+  _global) ;;
+  *) valid_ifname "$AJK" || api_fail "Invalid interface name" ;;
+  esac
+  case "$*" in
+  "-i $AJK start" | "-i $AJK restart" | "-i $AJK stop" | "-i $AJK renew --force" | 'cache refresh' | 'api refresh-list' | 'api login') ;;
+  *) api_fail "Command not allowed" ;;
+  esac
+  AJF="$RUNDIR/job.$AJK"
+  if [ -s "$AJF" ]; then
+    read -r AJST AJPID AJTS _ <"$AJF"
+    if [ "$AJST" = 'running' ]; then
+      if [ "$AJPID" -gt 0 ] && kill -0 "$AJPID" 2>/dev/null; then api_fail "Busy: a command is still running"; fi
+      [ "$AJPID" -gt 0 ] || [ $(($(date +%s) - AJTS)) -gt 10 ] || api_fail "Busy: a command is starting"
+    fi
+  fi
+  echo "running 0 $(date +%s) $*" >"$AJF"
+  : >"$AJF.out"
+  /bin/sh -c 'f="$1"; shift; c="$*"; echo "running $$ $(date +%s) $c" >"$f"; /bin/sh "$0" "$@" >"$f.out" 2>&1; echo "done $? $(date +%s) $c" >"$f"' \
+    "$SCRIPTPATH" "$AJF" "$@" </dev/null >/dev/null 2>&1 &
+  api_ok
+}
+
+# api_iface_save <name> [key=value…]: create or modify an interface
+#   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace
+#   mtu=std|small|<576-1500>  route=yes|no  firewall=yes|no  forward="<zones>"  strict=yes
+api_iface_save() {
+  AN="$1"
+  shift
+  valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_MTU='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET=''
+  for AKV in "$@"; do
+    AV="${AKV#*=}"
+    case "$AKV" in
+    proto=*) A_PROTO="$AV" ;;
+    region=*) A_REGION="$AV" ;;
+    fast=*) A_FAST="$AV" ;;
+    dns=*) A_DNS="$AV" ;;
+    mtu=*) A_MTU="$AV" ;;
+    route=*) A_ROUTE="$AV" ;;
+    firewall=*) A_FW="$AV" ;;
+    forward=*)
+      A_FWD="$AV"
+      A_FWDSET=1
+      ;;
+    strict=*) A_STRICT="$AV" ;;
+    *) api_fail "Unknown setting '${AKV%%=*}'" ;;
+    esac
+  done
+  case "$A_PROTO" in '' | amneziawg | wireguard | auto) ;; *) api_fail "Invalid protocol" ;; esac
+  case "$A_FAST" in '' | 0 | 1) ;; *) api_fail "Invalid fast region value" ;; esac
+  case "$A_DNS" in '' | standard | mace) ;; *) api_fail "Invalid DNS choice" ;; esac
+  case "$A_ROUTE" in '' | yes | no) ;; *) api_fail "Invalid route choice" ;; esac
+  case "$A_FW" in '' | yes | no) ;; *) api_fail "Invalid firewall choice" ;; esac
+  case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
+  case "$A_MTU" in
+  '' | std | small) ;;
+  *[!0-9]*) api_fail "Invalid packet size" ;;
+  *) { [ "$A_MTU" -ge 576 ] && [ "$A_MTU" -le 1500 ]; } || api_fail "Packet size: 576 to 1500" ;;
+  esac
+  for AZ in $A_FWD; do
+    case "$AZ" in *[!A-Za-z0-9_-]*) api_fail "Invalid zone name" ;; esac
+    [ -n "$(fw_zone_id "$AZ")" ] || api_fail "No firewall zone named '$AZ'"
+  done
+  if [ "$A_ROUTE" = 'yes' ]; then
+    for AOT in $(iface_list | grep -vx "$AN"); do
+      has_default_route "$AOT" && api_fail "$AOT already has the default route: remove it there first"
+    done
+  fi
+  lock_take "api iface-save"
+  AWNEW=''
+  iface_exists "$AN" || AWNEW=1
+  PIAWG_IF="$AN"
+  set_ifvars
+  # protocol
+  AWMODE=''
+  AWP=''
+  case "$A_PROTO" in
+  auto)
+    awg_available || api_fail "AmneziaWG is not installed: automatic selection needs both protocols"
+    AWMODE=auto
+    AWP="$PIAPROTO"
+    [ -n "$AWNEW" ] && AWP='amneziawg'
+    ;;
+  amneziawg)
+    awg_available || api_fail "AmneziaWG is not installed (packages amneziawg-tools, kmod-amneziawg, luci-proto-amneziawg)"
+    AWP="$A_PROTO"
+    ;;
+  wireguard) AWP="$A_PROTO" ;;
+  *)
+    if [ -n "$AWNEW" ]; then
+      if awg_available; then AWP='amneziawg'; else AWP='wireguard'; fi
+    fi
+    ;;
+  esac
+  if [ "$AWP" = 'amneziawg' ] && uci -q get "pia.$AN.dip_token" >/dev/null; then
+    api_fail "A dedicated IP needs WireGuard"
+  fi
+  # the region: from the servers list, with the servers of the protocol
+  ASERV="$(cache_dir)/servers.json"
+  if [ -n "$A_REGION" ]; then
+    uci -q get "pia.$AN.dip_token" >/dev/null && api_fail "The region comes from the dedicated IP"
+    PIAREGIONS="$(jq -e '.regions | sort_by(.name)' "$ASERV" 2>/dev/null)" || api_fail "No servers list: refresh it first"
+    PIAREGIONID="$A_REGION"
+    ARG='wg'
+    [ "${AWP:-$PIAPROTO}" = 'amneziawg' ] && ARG='awg'
+    echo "$PIAREGIONS" | jq -e --arg i "$A_REGION" --arg g "$ARG" '.[] | select(.id == $i and .offline == false and .servers[$g])' >/dev/null ||
+      api_fail "Region '$A_REGION' has no ${AWP:-$PIAPROTO} servers"
+  elif [ -n "$AWNEW" ] && ! uci -q get "pia.$AN.dip_token" >/dev/null; then
+    api_fail "A region is needed"
+  fi
+  if [ -n "$AWNEW" ]; then
+    set_iface "$AN" || api_fail "Could not create the interface"
+    WZPROTO="$AWP"
+    set_defnetiface
+    set_defnetpeer
+    iface_defaults
+    if [ -z "$(others_list)" ]; then set_default_route yes; else set_default_route no; fi
+    [ -n "$A_DNS" ] || A_DNS=standard
+    [ -n "$A_MTU" ] || A_MTU=std
+    [ -n "$A_FW" ] || A_FW=yes
+    [ -n "$A_STRICT" ] || A_STRICT=yes
+  elif [ -n "$AWP" ] && [ "$AWP" != "$PIAPROTO" ]; then
+    switch_proto "$AWP"
+  fi
+  if [ "$AWMODE" = 'auto' ]; then
+    uci -q set "pia.$AN.proto_mode=auto"
+  elif [ -n "$A_PROTO" ]; then
+    uci -q delete "pia.$AN.proto_mode"
+  fi
+  uci -q commit pia
+  [ -z "$A_REGION" ] || store_region
+  case "$A_FAST" in
+  1) uci -q set "pia.$AN.region_fast=1" ;;
+  0) uci -q delete "pia.$AN.region_fast" ;;
+  esac
+  AWROUTE=''
+  case "$A_DNS" in
+  standard)
+    uci -q delete "pia.$AN.iface_dns"
+    AWROUTE=1
+    ;;
+  mace)
+    uci -q set "pia.$AN.iface_dns=$PIA_MACE_DNS"
+    AWROUTE=1
+    ;;
+  esac
+  case "$A_MTU" in
+  std) uci -q set "pia.$AN.iface_mtu=$(std_mtu)" ;;
+  small) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_SMALL" ;;
+  '') ;;
+  *) uci -q set "pia.$AN.iface_mtu=$A_MTU" ;;
+  esac
+  uci -q commit pia
+  case "$A_ROUTE" in
+  yes) has_default_route "$AN" || set_default_route yes ;;
+  no) ! has_default_route "$AN" || set_default_route no ;;
+  *) [ -z "$AWROUTE" ] || has_default_route "$AN" || set_default_route no ;;
+  esac
+  # the firewall zone, NAT and forwardings
+  case "$A_FW" in
+  yes)
+    uci -q set "pia.$AN.fw_zone=1"
+    if [ -n "$A_FWDSET" ]; then
+      uci -q delete "pia.$AN.fw_forward"
+      for AZ in $A_FWD; do uci -q add_list "pia.$AN.fw_forward=$AZ"; done
+    elif [ -n "$AWNEW" ]; then
+      for AZ in $(fw_lan_zone); do uci -q add_list "pia.$AN.fw_forward=$AZ"; done
+    fi
+    uci -q commit pia
+    fw_apply >&3
+    ;;
+  no)
+    uci -q delete "pia.$AN.fw_zone"
+    uci -q delete "pia.$AN.fw_forward"
+    uci -q commit pia
+    ;;
+  '')
+    if [ -n "$A_FWDSET" ] && [ "$(uci -q get "pia.$AN.fw_zone")" = '1' ]; then
+      uci -q delete "pia.$AN.fw_forward"
+      for AZ in $A_FWD; do uci -q add_list "pia.$AN.fw_forward=$AZ"; done
+      uci -q commit pia
+      fw_apply >&3
+    fi
+    ;;
+  esac
+  # dnsmasq: the PIA servers first
+  if [ "$A_STRICT" = 'yes' ]; then
+    DSLIST=''
+    for DSX in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p'); do
+      [ "$(uci -q get "dhcp.$DSX.noresolv")" = '1' ] && continue
+      [ "$(uci -q get "dhcp.$DSX.strictorder")" = '1' ] && continue
+      DSLIST="$DSLIST $DSX"
+    done
+    if [ -n "$DSLIST" ]; then
+      persist_run dns_strict_set
+      /etc/init.d/dnsmasq reload >/dev/null 2>&1
+    fi
+    uci -q set "pia.$AN.dns_asked=1"
+    uci -q commit pia
+  fi
+  api_ok
+}
+
+api_iface_remove() {
+  iface_exists "$1" || api_fail "No interface named '$1'"
+  lock_take "api iface-remove"
+  AUTO=1 remove_iface "$1" >/dev/null 2>&1
+  api_ok
+}
+
+api_cmd() {
+  case "$1" in
+  status) api_status ;;
+  regions) api_regions "$2" ;;
+  account) api_account ;;
+  login) api_login ;;
+  refresh-list)
+    pia_wan
+    if cache_refresh_list; then
+      jq -nc --arg r "$LISTRES" --argjson n "$LISTN" '{ok: true, result: $r, regions: $n}'
+    else
+      api_fail "The servers list could not be fetched"
+    fi
+    ;;
+  job) shift && api_job "$@" ;;
+  job-status) api_job_json "${2:-_global}" ;;
+  iface-save) shift && api_iface_save "$@" ;;
+  iface-remove) api_iface_remove "$2" ;;
+  log) if [ -s "$PIALOG" ]; then tail -n "${2:-80}" "$PIALOG"; fi ;;
+  *) api_fail "Unknown api command '$1'" ;;
+  esac
 }
 
 # ---- Main ->
@@ -2677,7 +3113,10 @@ set_ifvars
 PIALOG="$(logfile)"
 
 # Logging (only if not in interactive mode)
-if [ "$AUTO" ]; then
+if [ "$1" = 'api' ]; then
+  AUTO=1
+  exec 3>&2
+elif [ "$AUTO" ]; then
   FIFO="$RUNDIR/log.$$.fifo"
   export FIFO
   [ -f "$PIALOG" ] && touch "$PIALOG" || echo "[$(date)] Log created" >"$PIALOG"
@@ -2802,6 +3241,10 @@ case "$1" in
     exit 1
     ;;
   esac ;;
+'api')
+  shift
+  api_cmd "$@"
+  ;;
 'watchdog') case "$2" in
   'install') watchdog_install ;;
   'remove') watchdog_remove ;;
@@ -2898,6 +3341,15 @@ case "$1" in
   'path') set_logpath ;;
   *)
     echo "Unknown log subcommand '$2'!"
+    print_usage
+    exit 1
+    ;;
+  esac ;;
+'luci') case "$2" in
+  'install') luci_install ;;
+  'remove') luci_remove ;;
+  *)
+    echo "Unknown luci subcommand '$2'!"
     print_usage
     exit 1
     ;;

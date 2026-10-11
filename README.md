@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.1.9 (upstream 1.0.16)
+1.2.0 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -20,6 +20,7 @@ Changes compared to upstream 1.0.16:
   - The WireGuard key pair and the server settings are kept in RAM only (like the official apps); the persistent network config is written only when it changes; `renew` (cron, ifup hook) replaces the watchdog for an ordinary `ifup`/`ifdown` managed interface, and the watchdog backs off after failed restarts
   - One config, `/etc/config/pia` (was `pia_wg`), with a section per interface named like it: several PIA interfaces on one router (`-i NAME`), sharing the account, tokens and cache; the script, cron tags, hook, log and cache directory use `pia` names (older names are converted on the first run)
   - AmneziaWG (PIA's obfuscated WireGuard, as in the Android app) is the default protocol of a new interface: `iface_proto`, asked right after the name, `configure protocol`; the servers list is the v7 one; also at interface creation: automatic protocol (AmneziaWG, then WireGuard), MACE DNS, small packets, fastest region of the country; a 401 is retried after 5/15/30 s before the VPN token is renewed
+  - A LuCI web interface (Services > PIA VPN, `luci install`): account, interfaces and a wizard to create them; the script gets JSON `api` commands for it (see *Web interface*)
 
 ## Install
   - Connect to your OpenWrt router with SSH
@@ -115,6 +116,13 @@ config interface 'vpn_pia'
   - **Firewall**: `Create firewall zone 'NAME' with NAT and MSS clamping? (Y/n)` creates a zone named like the interface (input and forward DROP, masquerading, MSS clamping, marked `pia_managed`) and then asks which zones may forward to it (enter for the LAN zone, `-` for none). An existing zone with that name is adopted after asking, never removed. The firewall is checked (`fw4 check`) and reloaded only when something changed; only `configure` touches it, never start, renew or the hook. `configure firewall` asks again, `configure remove` removes the zone and forwardings the script made.
   - **DNS**: the interface carries PIA's DNS servers (those `addKey` returns, 10.0.0.243 and 10.0.0.242 normally; set `iface_dns` to use others) with `dns_metric 1`, so they come first in `resolv.conf.auto`. dnsmasq only keeps that order with `strictorder`: `Set strict-order on them? (Y/n)` offers it for the dnsmasq instances that use the interfaces' servers (not those with `noresolv`, such as an instance with its own upstream: its clients do not use PIA's DNS at all).
   - **Keepalive** is PIA's, 25 seconds (as the official apps); the interface route metric is distinct for each PIA interface (the first keeps the default one), so a destination routed by several of them (the DNS hosts) is resolved by metric.
+
+## Web interface (LuCI)
+`pia_wg.sh luci install` adds **Services > PIA VPN** to LuCI (the files are in the `luci/` directory of the repository: a view, a menu entry, an ACL and an rpcd plugin that calls the script's `api` commands; `luci remove` removes them; log in to LuCI again afterwards). It uses LuCI's own widgets, so it follows the theme, including its dark mode.
+  - **Account**: the PIA user id and password (the password is write-only), the token state, *Renew login* and *Refresh servers and tokens*.
+  - **Interfaces**: one row per interface with its region, protocol, settings and state (handshake age, endpoint), and Start, Stop, Restart, Edit and Remove. **Add interface…** opens the wizard: name, protocol (AmneziaWG, WireGuard or automatic), region (country, region, streaming/port forwarding filters, fastest region), DNS servers (standard or MACE), packet size, default route, firewall zone and forwardings (and dnsmasq strict order), then a review. It offers to start the new interface.
+  - Start, restart, stop and logins run in the background (the page follows the output); a change of settings applies at the next start or restart.
+  - What it cannot do (use `configure` on the command line): a dedicated IP, renaming, the offline cache location.
 
 ## Keeping the key registered with `renew` (no watchdog)
 `./pia_wg.sh renew install` makes the VPN behave like an ordinary WireGuard interface, started and stopped with `ifup`/`ifdown` (or from LuCI), and removes the watchdog:
@@ -231,6 +239,8 @@ Usage: `pia_wg.sh [ -i <interface|all> ] { configure <section> | start [ --watch
   - `log show`           : display the watchdog log
   - `log clear`          : clear the watchdog log
   - `log path`           : set a custom Directory Path for the log
+  - `luci install`       : install the LuCI web interface (`luci remove` removes it)
+  - `api …`              : JSON commands used by the web interface (status, regions, iface-save, …)
   - `update`             : update the script to latest version
   - `version`            : print the version and exit
 
