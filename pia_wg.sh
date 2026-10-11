@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.29
+# Version: 1.0.30
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2708,7 +2708,7 @@ api_job_json() {
     fi
     jq -nc --arg s "$AJST" --arg c "$AJCMD" --arg t "$AJTS" --arg rc "$AJRC" --rawfile o "$AJS.out" \
       '{state: $s, cmd: $c, since: ($t | tonumber? // 0), rc: (if $s == "done" then ($rc | tonumber? // null) else null end),
-        output: ($o | split("\n") | map(select(. != "")) | .[-12:])}' 2>/dev/null ||
+        output: ($o | split("\n") | map(select(. != "" and (startswith("{\"ok\":") | not))) | .[-12:])}' 2>/dev/null ||
       echo null
   else
     echo null
