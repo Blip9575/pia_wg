@@ -376,10 +376,10 @@ return view.extend({
 			fill();
 			dom.content(box, [
 				field(_('Country'), countrySel),
-				field(_('Region'), regionSel),
 				field(_('Streaming optimised only'), so),
 				field(_('Port forwarding only'), pf),
-				field(_('Fastest region'), fastCb, _('At each start, use the fastest region of that country (by ping) instead of the one chosen.'))
+				field(_('Fastest region'), fastCb, _('At each start, use the fastest region of that country (by ping) instead of the one chosen.')),
+				field(_('Region'), regionSel)
 			]);
 		};
 
