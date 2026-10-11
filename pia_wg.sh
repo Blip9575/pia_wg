@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.2.1
+# Version: 1.2.2
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -383,7 +383,7 @@ meta_candidates() {
     ($regs | split(" ") | map(select(length > 0))) as $r
     | [.regions[] | select(.offline == false)]
     | map(select(.id as $i | $r | index($i))) + map(select(.id as $i | $r | index($i) | not))
-    | .[].servers.meta[]? | "\(.ip) \(.cn)"' "$SL"
+    | .[].servers.meta[]? | "\(.ip) \(.cn)"' "$SL" 2>/dev/null # the reader may stop early (head)
 }
 
 # Keep the meta servers whose certificate validates against the PIA CA
