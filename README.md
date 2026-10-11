@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.3.3 (upstream 1.0.16)
+1.3.4 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -172,6 +172,8 @@ Some PIA WireGuard servers refuse the long lived VPN token and only accept the l
 
 The first time (and when the result is older than a week), `configure region` offers to check the regions; this takes a few minutes. It can also be run with `./pia_wg.sh cache probe`. The check calls `addKey` with a deliberately invalid public key, so no key is registered on the servers, and leaves through the WAN, because PIA does not accept it from inside its own tunnel. A PIA server removes the existing peer of a token before it validates a new key, even when the request then fails, so the check never asks the server the tunnel is connected to (a region is judged on its other servers, or keeps its previous result). Some servers answer differently from one request to the next; a region is marked only if its servers refuse every time. The result is a snapshot, kept with its date in `legacy.list` in the cache directory. When the configured region is in that list, connecting goes straight to the legacy token instead of first trying the VPN token and being refused.
 
+`./pia_wg.sh cache probe GB` checks only the regions of one country and merges the result into the list (a `#c GB <epoch>` line records when). The web interface starts this in the background when an interface is saved with a region of a country whose result is older than a week, so the next start goes straight to the right token; a start meanwhile waits for it (a few seconds to a minute).
+
 All the script's calls to PIA leave through the WAN device used to reach the tunnel endpoint, not through the tunnel, so the cache and tokens can be refreshed whether the PIA tunnel is up, down or not passing traffic, and without disconnecting it. `cache refresh` shows what it did (and the cron job writes the same lines to the log):
 ```
 Cache update (leaving via br-wan; PIA tunnel unchanged)
@@ -236,7 +238,7 @@ Usage: `pia_wg.sh [ -i <interface|all> ] { configure <section> | start [ --watch
   - `cache install`      : install the cache refresh (cron, every 6 hours)
   - `cache remove`       : remove the cache refresh
   - `cache show`         : show the offline cache
-  - `cache probe`        : check which regions need the legacy token
+  - `cache probe [CC]`  : check which regions (of the country CC only) need the legacy token
   - `log show`           : display the watchdog log
   - `log clear`          : clear the watchdog log
   - `log path`           : set a custom Directory Path for the log
