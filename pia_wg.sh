@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.3.2
+# Version: 1.3.3
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -999,7 +999,6 @@ EOS
 
 # Is the configured region marked in the legacy list ('cache probe')?
 region_needs_legacy() {
-  [ "$PIAPROTO" = 'amneziawg' ] && return 1 # measured on the WireGuard servers
   LRID="$(uci -q get "pia.$PIAWG_IF.region_id")" || return 1
   [ -n "$LRID" ] || return 1
   case " $(legacy_ids) " in
