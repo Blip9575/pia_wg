@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.2.4
+# Version: 1.2.5
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1452,6 +1452,11 @@ forget_net() {
   uci -q revert "network.$PIAWG_PEER"
   if [ -n "$DNEP" ]; then
     while ip route del "$DNEP/32" 2>/dev/null; do :; done
+  fi
+  # netifd keeps the interface object of a deleted section (LuCI shows it as
+  # 'marked for deletion') until it rereads the config
+  if ubus list "network.interface.$PIAWG_IF" >/dev/null 2>&1; then
+    ubus call network reload >/dev/null 2>&1
   fi
 }
 
