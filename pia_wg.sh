@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.22
+# Version: 1.0.23
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -26,7 +26,6 @@ RENEW_SKIP=180        # seconds: a handshake this recent means the registration 
 RUNDIR='/var/run/pia' # temporary files (RAM); created on demand, mode 0700
 LOCKDIR="$RUNDIR/lock"
 LEGACYTOK="$RUNDIR/legacy.token"                             # legacy 24h token (RAM only; one per account)
-UCISTAGE='/tmp/.uci/network'                                 # where uci keeps the RAM-staged (uncommitted) changes of the network package
 WGPLACEHOLDER='Hy+p7zrRBZWl5uBqhcFvnvMrRWb7Glhq6P5xe2ZkyHw=' # fixed, never registered: keeps wireguard.sh from generating (and saving) a key
 LOCK_WAIT=120                                                # seconds a manual command waits for another run
 LOCK_STEAL=900                                               # seconds after which a run still holding the lock is considered stuck
@@ -34,6 +33,10 @@ LOGDEFPATH='/var/log/pia'
 LOGNAME='pia.log'
 PIACONF='/etc/config/pia' # one section per interface, named like it; the account, tokens, cache and log are shared
 RESERVED_NAMES=' account apitoken vpntoken cache log '
+PIA_DNS1='10.0.0.243' # PIA's DNS servers (what addKey returns)
+PIA_DNS2='10.0.0.242'
+PIA_KEEPALIVE=25            # the official apps' PersistentKeepalive
+UCISTAGEDIR='/tmp/.uci'     # where uci keeps the RAM-staged (uncommitted) changes
 PIAWG_IF='wg_pia'           # the interface being handled (-i NAME, or the only one configured)
 CACHEDEFDIR='/mnt/usb/pia'  # external storage, to spare the router flash
 CACHERAMDIR="$RUNDIR/cache" # used when the external storage is not mounted
@@ -1045,6 +1048,292 @@ set_dip() {
   uci -q commit pia
 }
 
+# ---- Default route, firewall zone and DNS priority of an interface ----
+
+# The other PIA interfaces
+others_list() { iface_list | grep -vx "$PIAWG_IF"; }
+
+# set_default_route yes|no: all traffic through the interface, or only the
+# PIA DNS hosts (so that it can still be tested and used for DNS)
+set_default_route() {
+  uci -q delete "pia.$PIAWG_IF.peer_allowed_ips"
+  if [ "$1" = 'yes' ]; then
+    uci -q add_list "pia.$PIAWG_IF.peer_allowed_ips=0.0.0.0/0"
+    uci -q add_list "pia.$PIAWG_IF.peer_allowed_ips=::/0"
+    uci -q set "pia.$PIAWG_IF.iface_defaultroute=1"
+  else
+    uci -q add_list "pia.$PIAWG_IF.peer_allowed_ips=$PIA_DNS1/32"
+    uci -q add_list "pia.$PIAWG_IF.peer_allowed_ips=$PIA_DNS2/32"
+    uci -q set "pia.$PIAWG_IF.iface_defaultroute=0"
+  fi
+  uci -q set "pia.$PIAWG_IF.peer_route_allowed_ips=1"
+  uci -q commit pia
+}
+
+# Does this interface hold the default route?
+has_default_route() { uci -q get "pia.$1.peer_allowed_ips" | grep -q '0\.0\.0\.0/0'; }
+
+# Default route of the interface being handled (asked when it is created):
+# with several PIA interfaces none may have it, or one VPN would run inside
+# another.
+ask_default_route() {
+  ADROTHERS="$(others_list)"
+  if [ -z "$ADROTHERS" ]; then
+    if read_yn "Route all traffic through $PIAWG_IF (default route)" y; then
+      set_default_route yes
+    else
+      set_default_route no
+    fi
+    return 0
+  fi
+  echo "Other PIA interfaces: $(echo "$ADROTHERS" | tr '\n' ' ')"
+  echo "Two default routes cannot work together (one VPN would run inside the other)."
+  echo "Traffic then has to be sent to the VPNs by policy routing, firewall marks or"
+  echo "per-device routes, which this script does not set up."
+  if read_yn "Remove the default route from all PIA interfaces (including $PIAWG_IF)" y; then
+    ADRKEEP="$PIAWG_IF"
+    for ADRX in $ADROTHERS $ADRKEEP; do
+      PIAWG_IF="$ADRX"
+      set_default_route no
+    done
+    PIAWG_IF="$ADRKEEP"
+    set_ifvars
+    echo "Default routes removed; running tunnels change at their next restart"
+  else
+    set_default_route no
+  fi
+}
+
+# Fill in what an interface section lacks (written only if missing)
+iface_defaults() {
+  IDCH=''
+  if [ -z "$(uci -q get "pia.$PIAWG_IF.iface_dns_metric")" ]; then
+    uci -q set "pia.$PIAWG_IF.iface_dns_metric=1" # its DNS servers come first in resolv.conf.auto
+    IDCH=1
+  fi
+  if [ -z "$(uci -q get "pia.$PIAWG_IF.peer_persistent_keepalive")" ]; then
+    uci -q set "pia.$PIAWG_IF.peer_persistent_keepalive=$PIA_KEEPALIVE"
+    IDCH=1
+  fi
+  if [ -z "$(uci -q get "pia.$PIAWG_IF.iface_metric")" ] && [ -n "$(others_list)" ]; then
+    # a distinct route metric: the first interface keeps the default one, the
+    # PIA DNS hosts routed by several interfaces are then resolved by metric
+    IDMAX=0
+    for IDX in $(others_list); do
+      IDM="$(uci -q get "pia.$IDX.iface_metric")"
+      [ "${IDM:-0}" -gt "$IDMAX" ] && IDMAX="$IDM"
+    done
+    uci -q set "pia.$PIAWG_IF.iface_metric=$((IDMAX + 10))"
+    IDCH=1
+  fi
+  [ -z "$IDCH" ] || uci -q commit pia
+  return 0
+}
+
+# ---- firewall: zone, NAT and forwardings (only touched by configure)
+
+fw_zone_id() { uci -q show firewall | sed -n "s/^firewall\\.\\([^.]*\\)\\.name='$1'\$/\\1/p" | head -n 1; }
+
+# The zone the LAN is in: 'lan', or the first one named like it
+fw_lan_zone() {
+  FWZ="$(uci -q show firewall | sed -n "s/^firewall\\.[^.]*\\.name='\\([^']*\\)'\$/\\1/p")"
+  for FWN in $FWZ; do
+    [ "$FWN" = 'lan' ] && {
+      echo lan
+      return
+    }
+  done
+  for FWN in $FWZ; do
+    case "$FWN" in
+    *wan* | *vpn* | *pia*) ;;
+    *lan*)
+      echo "$FWN"
+      return
+      ;;
+    esac
+  done
+}
+
+# Make firewall.* what pia.<if>.fw_zone / fw_forward say (compare, then write).
+# Run through persist_run: sets FWCHANGED.
+fw_apply_inner() {
+  FWCHANGED=''
+  FWID="$(fw_zone_id "$PIAWG_IF")"
+  if [ -z "$FWID" ]; then
+    FWID="$(uci -q add firewall zone)"
+    uci -q set "firewall.$FWID.name=$PIAWG_IF"
+    uci -q add_list "firewall.$FWID.network=$PIAWG_IF"
+    uci -q set "firewall.$FWID.input=DROP"
+    uci -q set "firewall.$FWID.output=ACCEPT"
+    uci -q set "firewall.$FWID.forward=DROP"
+    uci -q set "firewall.$FWID.masq=1"
+    uci -q set "firewall.$FWID.mtu_fix=1"
+    uci -q set "firewall.$FWID.pia_managed=1"
+    FWCHANGED=1
+  else
+    case " $(uci -q get "firewall.$FWID.network") " in
+    *" $PIAWG_IF "*) ;;
+    *)
+      uci -q add_list "firewall.$FWID.network=$PIAWG_IF"
+      FWCHANGED=1
+      ;;
+    esac
+    for FWO in masq mtu_fix; do
+      [ "$(uci -q get "firewall.$FWID.$FWO")" = '1' ] && continue
+      uci -q set "firewall.$FWID.$FWO=1"
+      FWCHANGED=1
+    done
+  fi
+  # forwardings to it: the wanted ones, and none we made that are not
+  FWWANT=" $(uci -q get "pia.$PIAWG_IF.fw_forward") "
+  FWN=0
+  FWHAVE=' '
+  while uci -q get "firewall.@forwarding[$FWN]" >/dev/null; do FWN=$((FWN + 1)); done
+  FWI=$((FWN - 1))
+  while [ "$FWI" -ge 0 ]; do
+    if [ "$(uci -q get "firewall.@forwarding[$FWI].dest")" = "$PIAWG_IF" ]; then
+      FWS="$(uci -q get "firewall.@forwarding[$FWI].src")"
+      case "$FWWANT" in
+      *" $FWS "*) FWHAVE="$FWHAVE$FWS " ;;
+      *)
+        if [ "$(uci -q get "firewall.@forwarding[$FWI].pia_managed")" = '1' ]; then
+          uci -q delete "firewall.@forwarding[$FWI]"
+          FWCHANGED=1
+        fi
+        ;;
+      esac
+    fi
+    FWI=$((FWI - 1))
+  done
+  for FWS in $FWWANT; do
+    case "$FWHAVE" in
+    *" $FWS "*) continue ;;
+    esac
+    FWF="$(uci -q add firewall forwarding)"
+    uci -q set "firewall.$FWF.src=$FWS"
+    uci -q set "firewall.$FWF.dest=$PIAWG_IF"
+    uci -q set "firewall.$FWF.pia_managed=1"
+    FWCHANGED=1
+  done
+  [ -z "$FWCHANGED" ] || uci -q commit firewall
+  return 0
+}
+
+# Remove the zone and the forwardings we made for the interface being handled
+fw_remove_inner() {
+  FWCHANGED=''
+  FWN=0
+  while uci -q get "firewall.@forwarding[$FWN]" >/dev/null; do FWN=$((FWN + 1)); done
+  FWI=$((FWN - 1))
+  while [ "$FWI" -ge 0 ]; do
+    if [ "$(uci -q get "firewall.@forwarding[$FWI].dest")" = "$PIAWG_IF" ] &&
+      [ "$(uci -q get "firewall.@forwarding[$FWI].pia_managed")" = '1' ]; then
+      uci -q delete "firewall.@forwarding[$FWI]"
+      FWCHANGED=1
+    fi
+    FWI=$((FWI - 1))
+  done
+  FWID="$(fw_zone_id "$PIAWG_IF")"
+  if [ -n "$FWID" ] && [ "$(uci -q get "firewall.$FWID.pia_managed")" = '1' ]; then
+    uci -q delete "firewall.$FWID"
+    FWCHANGED=1
+  fi
+  [ -z "$FWCHANGED" ] || uci -q commit firewall
+  return 0
+}
+
+# Reload the firewall if something changed (after fw4's own check)
+fw_reload() {
+  [ -n "$FWCHANGED" ] || return 0
+  if command -v fw4 >/dev/null 2>&1 && ! fw4 check >/dev/null 2>&1; then
+    echo "fw4 check failed: the firewall was not reloaded (see: fw4 check)" >&3
+    return 1
+  fi
+  /etc/init.d/firewall reload >/dev/null 2>&1
+  echo "Firewall updated and reloaded"
+}
+
+fw_apply() {
+  [ "$(uci -q get "pia.$PIAWG_IF.fw_zone")" = '1' ] || return 0
+  persist_run fw_apply_inner
+  fw_reload
+}
+
+# Ask about the zone, NAT and forwardings, store the answers, apply them
+ask_firewall() {
+  AFID="$(fw_zone_id "$PIAWG_IF")"
+  if [ -n "$AFID" ] && [ "$(uci -q get "firewall.$AFID.pia_managed")" != '1' ]; then
+    echo "A firewall zone named '$PIAWG_IF' already exists."
+    read_yn "Use it (associate the interface, enable NAT and MSS clamping)" y || return 0
+  else
+    read_yn "Create firewall zone '$PIAWG_IF' with NAT and MSS clamping" y || {
+      uci -q delete "pia.$PIAWG_IF.fw_zone"
+      uci -q delete "pia.$PIAWG_IF.fw_forward"
+      uci -q commit pia
+      return 0
+    }
+  fi
+  AFDEF="$(uci -q get "pia.$PIAWG_IF.fw_forward")"
+  [ -n "$AFDEF" ] || AFDEF="$(fw_lan_zone)"
+  printf "Zones allowed to forward to it, space separated (enter for '%s', '-' for none): " "${AFDEF:-none}"
+  read -r AFANS || AFANS=''
+  case "$AFANS" in
+  '') AFANS="$AFDEF" ;;
+  '-') AFANS='' ;;
+  esac
+  uci -q set "pia.$PIAWG_IF=interface"
+  uci -q set "pia.$PIAWG_IF.fw_zone=1"
+  uci -q delete "pia.$PIAWG_IF.fw_forward"
+  for AFZ in $AFANS; do uci -q add_list "pia.$PIAWG_IF.fw_forward=$AFZ"; done
+  uci -q commit pia
+  fw_apply
+}
+
+# dnsmasq only keeps the order of the servers of resolv.conf.auto (PIA's first,
+# by dns_metric) with strict-order; offer it for the instances that use it
+dns_offer_strict() {
+  [ "$(uci -q get "pia.$PIAWG_IF.dns_asked")" = '1' ] && return 0
+  DSLIST=''
+  for DSX in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p'); do
+    [ "$(uci -q get "dhcp.$DSX.noresolv")" = '1' ] && continue
+    [ "$(uci -q get "dhcp.$DSX.strictorder")" = '1' ] && continue
+    DSLIST="$DSLIST $DSX"
+  done
+  if [ -n "$DSLIST" ]; then
+    echo "dnsmasq instance(s) using the interfaces' DNS servers:$DSLIST"
+    echo "Without strict-order dnsmasq may still query the WAN's servers; with it the"
+    echo "PIA servers (lowest dns_metric) are tried first."
+    if read_yn "Set strict-order on them" y; then
+      persist_run dns_strict_set
+      /etc/init.d/dnsmasq reload >/dev/null 2>&1
+    fi
+  fi
+  uci -q set "pia.$PIAWG_IF.dns_asked=1"
+  uci -q commit pia
+}
+
+dns_strict_set() {
+  for DSX in $DSLIST; do uci -q set "dhcp.$DSX.strictorder=1"; done
+  uci -q commit dhcp
+}
+
+# What is asked when an interface is created (only what is not set yet)
+iface_wizard() {
+  WZNEW=''
+  uci -q get "pia.$PIAWG_IF.peer_allowed_ips" >/dev/null || WZNEW=1
+  keep_conf_section 'net_interface' || set_defnetiface
+  keep_conf_section 'net_peer' || set_defnetpeer
+  iface_defaults
+  [ -z "$AUTO" ] || return 0
+  [ -z "$WZNEW" ] || ask_default_route
+  if [ "$(uci -q get "pia.$PIAWG_IF.fw_asked")" != '1' ]; then
+    ask_firewall
+    uci -q set "pia.$PIAWG_IF.fw_asked=1"
+    uci -q commit pia
+  fi
+  dns_offer_strict
+}
+
 # Create an interface section ($1: the name; asked if missing)
 set_iface() {
   NEWIF="$1"
@@ -1121,10 +1410,22 @@ remove_iface() {
   watchdog_remove
   ifdown "$PIAWG_IF" >/dev/null 2>&1
   forget_net
+  persist_run fw_remove_inner
+  fw_reload
   uci -q delete "pia.$PIAWG_IF"
   uci -q commit pia
   rm -f "$SESSION"
   echo "Interface $PIAWG_IF removed"
+  # one left without the default route: offer it back
+  RMLEFT="$(iface_list)"
+  if [ -n "$RMLEFT" ] && [ "$(echo "$RMLEFT" | wc -l)" -eq 1 ] && [ -z "$AUTO" ] && ! has_default_route "$RMLEFT"; then
+    PIAWG_IF="$RMLEFT"
+    set_ifvars
+    if read_yn "Make $PIAWG_IF the default route again" y; then
+      set_default_route yes
+      echo "Applies at the next restart of $PIAWG_IF"
+    fi
+  fi
 }
 
 set_defnetpeer() {
@@ -1132,7 +1433,7 @@ set_defnetpeer() {
   uci -q batch <<EOI >/dev/null
     set pia.$PIAWG_IF=interface
     set pia.$PIAWG_IF.peer_route_allowed_ips='1'
-    set pia.$PIAWG_IF.peer_persistent_keepalive="25"
+    set pia.$PIAWG_IF.peer_persistent_keepalive="$PIA_KEEPALIVE"
     add_list pia.$PIAWG_IF.peer_allowed_ips="::/0"
     add_list pia.$PIAWG_IF.peer_allowed_ips="0.0.0.0/0"
     commit pia
@@ -1311,8 +1612,11 @@ persist_batch() {
   echo "delete network.$PIAWG_PEER"
   echo "set network.$PIAWG_IF=interface"
   echo "set network.$PIAWG_IF.private_key=$WGPLACEHOLDER"
-  echo "add_list network.$PIAWG_IF.dns=${WGDNS1:-10.0.0.243}"
-  echo "add_list network.$PIAWG_IF.dns=${WGDNS2:-10.0.0.242}"
+  # PIA's DNS servers, unless the interface has its own (iface_dns)
+  if ! uci -q get "pia.$PIAWG_IF.iface_dns" >/dev/null; then
+    echo "add_list network.$PIAWG_IF.dns=${WGDNS1:-$PIA_DNS1}"
+    echo "add_list network.$PIAWG_IF.dns=${WGDNS2:-$PIA_DNS2}"
+  fi
   echo "set network.$PIAWG_PEER=wireguard_${PIAWG_IF}"
   echo "set network.$PIAWG_PEER.description='PIA $(uci -q get "pia.$PIAWG_IF.region_name" | tr -d "'")'"
   # the interface's iface_* options go to the network interface, peer_* to the peer
@@ -1333,20 +1637,22 @@ persist_batch() {
 # or committing the persistent config with them in place would write the key
 # to the flash. They are put back afterwards.
 persist_run() {
-  PRSAVED=''
-  if [ -f "$UCISTAGE" ]; then
-    PRSAVED="$RUNDIR/staged.$$.tmp"
-    mv "$UCISTAGE" "$PRSAVED"
-  fi
+  PRSAVEDPKGS=''
+  for PRP in network firewall dhcp; do
+    [ -f "$UCISTAGEDIR/$PRP" ] || continue
+    mv "$UCISTAGEDIR/$PRP" "$RUNDIR/staged.$PRP.$$.tmp"
+    PRSAVEDPKGS="$PRSAVEDPKGS $PRP"
+  done
   "$@"
   PRRC=$?
-  if [ -n "$PRSAVED" ] && [ -f "$PRSAVED" ]; then
-    if [ -f "$UCISTAGE" ]; then
-      cat "$PRSAVED" "$UCISTAGE" >"$PRSAVED.m" && mv "$PRSAVED.m" "$UCISTAGE" && rm -f "$PRSAVED"
+  for PRP in $PRSAVEDPKGS; do
+    if [ -f "$UCISTAGEDIR/$PRP" ]; then
+      cat "$RUNDIR/staged.$PRP.$$.tmp" "$UCISTAGEDIR/$PRP" >"$RUNDIR/staged.$PRP.$$.m" &&
+        mv "$RUNDIR/staged.$PRP.$$.m" "$UCISTAGEDIR/$PRP" && rm -f "$RUNDIR/staged.$PRP.$$.tmp"
     else
-      mv "$PRSAVED" "$UCISTAGE"
+      mv "$RUNDIR/staged.$PRP.$$.tmp" "$UCISTAGEDIR/$PRP"
     fi
-  fi
+  done
   return $PRRC
 }
 
@@ -1514,6 +1820,7 @@ set_netconf() {
     echo "Configuration is incomplete; exiting!" >&3
     exit 1
   }
+  iface_defaults
   # if no DIP (DIP_STATUS is set from check_conf)
   if [ -z "$DIP_STATUS" ]; then
     if region_needs_legacy; then
@@ -1930,7 +2237,9 @@ print_usage() {
   echo "    - configure rename <name>    : rename the interface (-i old)"
   echo "    - configure remove <name>    : forget an interface (config, network sections, cron)"
   echo "    - configure cache    : set offline cache directory and options"
-  echo "    - configure network  : generate default network settings"
+  echo "    - configure network  : generate default network settings (and ask about the default route)"
+  echo "    - configure route    : default route through the interface (none with several PIA interfaces)"
+  echo "    - configure firewall : firewall zone, NAT and the zones forwarded to the interface"
   echo "    - init-network       : setup PIA WireGuard network (no start)"
   echo "    - start              : start PIA WireGuard (if not already up)"
   echo "    - start --watchdog   : same as start and install the watchdog"
@@ -1972,7 +2281,7 @@ if [ "$1" = '-i' ]; then
   shift 2
 fi
 
-[ -t 0 ] && unset AUTO || AUTO=1
+if [ -t 0 ] || [ -n "$PIA_INTERACTIVE" ]; then unset AUTO; else AUTO=1; fi
 rundir_init
 trap cleanup EXIT
 trap 'exit 1' 1 2 3 6 15
@@ -2045,7 +2354,7 @@ if [ -n "$MULTI" ] || [ "$SELIF" = 'all' ]; then
     ;;
   'configure' | 'watchdog')
     case "$1 $2" in
-    'configure ' | 'configure all' | 'configure region' | 'configure dip' | 'configure network' | 'configure rename' | 'watchdog install' | 'watchdog remove')
+    'configure ' | 'configure all' | 'configure region' | 'configure dip' | 'configure network' | 'configure route' | 'configure firewall' | 'configure rename' | 'watchdog install' | 'watchdog remove')
       if [ -z "$SELIF" ] || [ "$SELIF" = 'all' ]; then
         echo "Several interfaces are configured ($(echo "$IFLIST" | tr '\n' ' ')): use -i NAME" >&2
         exit 1
@@ -2073,8 +2382,7 @@ case "$1" in
   '' | 'all')
     keep_conf_section 'user' || set_piauser
     iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
-    keep_conf_section 'net_interface' || set_defnetiface
-    keep_conf_section 'net_peer' || set_defnetpeer
+    iface_wizard
     if read_yn "Do you have a dedicated IP" n; then
       keep_conf_section 'dip' || set_dip
       validate_dip
@@ -2099,10 +2407,23 @@ case "$1" in
     iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
     keep_conf_section 'net_interface' || set_defnetiface
     keep_conf_section 'net_peer' || set_defnetpeer
+    iface_defaults
+    [ -n "$AUTO" ] || ask_default_route
+    ;;
+  'route')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
+    ask_default_route
+    ;;
+  'firewall')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
+    if [ -n "$AUTO" ]; then fw_apply; else ask_firewall; fi
     ;;
   'keys') echo "The WireGuard keys are not saved: a new pair is generated in RAM at each start (as the official apps do) or with 'renew --new-key'" ;;
   'cache') keep_conf_section 'cache' || set_cache ;;
-  'interface') set_iface "$3" ;;
+  'interface')
+    set_iface "$3" || exit 1
+    iface_wizard
+    ;;
   'rename') rename_iface "$3" ;;
   'remove') remove_iface "${3:-$SELIF}" ;;
   *)

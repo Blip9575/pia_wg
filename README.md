@@ -7,7 +7,7 @@ A script to setup and run PIA through WireGuard on OpenWrt
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.0.22
+1.0.23
 
 ## Install
   - Connect to your OpenWrt router with SSH
@@ -91,6 +91,13 @@ config interface 'vpn_pia'
   - With a single interface it is implicit. With several, `-i NAME` selects one (for example `./pia_wg.sh -i vpn_pia2 start`); `start`, `restart`, `stop`, `status`, `renew` and `init-network` without `-i` (or with `-i all`) act on each. `renew` and the ifup hook cover every interface.
   - Each interface has its own region (or dedicated IP), session key and watchdog entry. One PIA token can hold only one peer per server, so an interface does not pick a server another interface is using; give them different regions when you can.
   - Only one interface should have the default route if they are used for the same traffic: set `peer_route_allowed_ips '0'` (or narrower allowed IPs) on the others, and adapt the firewall zones.
+
+### When an interface is created
+`configure interface NAME` (and `configure all`) asks, with the answer in capitals taken by enter:
+  - **Default route**: `Route all traffic through NAME (default route)? (Y/n)`. With several PIA interfaces none may have it (a second default route would make one VPN run inside the other, and routing then has to be done by policy routing, firewall marks or per-device routes, which the script does not set up): creating a second interface asks `Remove the default route from all PIA interfaces?` (Y removes it from all, n only keeps it off the new one); the interfaces without it route just the two PIA DNS hosts, so that they can still be tested. Running tunnels change at their next restart. When one interface is left, `configure remove` offers the default route back. `configure route` asks again.
+  - **Firewall**: `Create firewall zone 'NAME' with NAT and MSS clamping? (Y/n)` creates a zone named like the interface (input and forward DROP, masquerading, MSS clamping, marked `pia_managed`) and then asks which zones may forward to it (enter for the LAN zone, `-` for none). An existing zone with that name is adopted after asking, never removed. The firewall is checked (`fw4 check`) and reloaded only when something changed; only `configure` touches it, never start, renew or the hook. `configure firewall` asks again, `configure remove` removes the zone and forwardings the script made.
+  - **DNS**: the interface carries PIA's DNS servers (those `addKey` returns, 10.0.0.243 and 10.0.0.242 normally; set `iface_dns` to use others) with `dns_metric 1`, so they come first in `resolv.conf.auto`. dnsmasq only keeps that order with `strictorder`: `Set strict-order on them? (Y/n)` offers it for the dnsmasq instances that use the interfaces' servers (not those with `noresolv`, such as an instance with its own upstream: its clients do not use PIA's DNS at all).
+  - **Keepalive** is PIA's, 25 seconds (as the official apps); the interface route metric is distinct for each PIA interface (the first keeps the default one), so a destination routed by several of them (the DNS hosts) is resolved by metric.
 
 ## Keeping the key registered with `renew` (no watchdog)
 `./pia_wg.sh renew install` makes the VPN behave like an ordinary WireGuard interface, started and stopped with `ifup`/`ifdown` (or from LuCI), and removes the watchdog:
@@ -183,7 +190,9 @@ Usage: `pia_wg.sh [ -i <interface|all> ] { configure <section> | start [ --watch
   - `configure rename NEW` : rename the interface (`-i OLD`)
   - `configure remove NAME`: forget an interface
   - `configure cache`    : set offline cache directory and options
-  - `configure network`  : generate default network settings
+  - `configure network`  : generate default network settings (and ask about the default route)
+  - `configure route`    : default route through the interface
+  - `configure firewall` : firewall zone, NAT and the zones forwarded to the interface
   - `init-network`       : setup PIA WireGuard network (no start)
   - `start`              : start PIA WireGuard (if not already up)
   - `start --watchdog`   : same as start and install the watchdog
