@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.35
+# Version: 1.0.36
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -742,7 +742,7 @@ select_region() {
     echo "Eliminating servers without ${PIAPROTO}…"
     while :; do
       read_yn "Port forward only servers" n && PIASERVPF='| select(.port_forward==true) ' || PIASERVPF=''
-      read_yn "Geo only servers" n && PIASERVGEO='| select(.geo==true) ' || PIASERVGEO=''
+      read_yn "Non geo-located only servers" y && PIASERVGEO='| select(.geo==false) ' || PIASERVGEO=''
       # Streaming optimised regions: 'Streaming' in the name or '-so.' in the DNS
       # name (their ids do not all end in '-so', e.g. uk_2)
       read_yn "Stream optimised only servers" n && PIASERVSO='| select((.name | contains("Streaming")) or (.dns | contains("-so."))) ' || PIASERVSO=''
