@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.3.6
+# Version: 1.4.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -47,6 +47,7 @@ PIA_KEEPALIVE=25    # the official apps' PersistentKeepalive
 # AmneziaWG obfuscation used when the server sends none (as the official app)
 PIA_AWG_DEFAULTS='jc=5 jmin=25 jmax=100 s1=5 s2=3 h1=1234567891 h2=1234567892 h3=1234567893 h4=1234567894'
 UCISTAGEDIR='/tmp/.uci'               # where uci keeps the RAM-staged (uncommitted) changes
+SESSSTATE='/var/state'                # RAM deltas of the session (key, address, server): read by netifd's protocol scripts, not by LuCI
 PIAWG_IF='pia'                        # the interface being handled (-i NAME, or the only one configured)
 CACHEDEFDIR='/mnt/usb/pia'            # external storage, to spare the router flash
 CACHERAMDIR="$RUNDIR/cache"           # used when the external storage is not mounted
@@ -88,7 +89,7 @@ rundir_init() {
 live_endpoints() {
   for LX in $(iface_list) "$PIAWG_IF"; do
     wgt "$LX" show "$LX" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}'
-    uci -q get "network.wgpeer_$LX.endpoint_host"
+    sget "network.wgpeer_$LX.endpoint_host"
   done | sort -u | tr '\n' ' '
 }
 
@@ -97,7 +98,7 @@ sibling_endpoints() {
   for LX in $(iface_list); do
     [ "$LX" = "$PIAWG_IF" ] && continue
     wgt "$LX" show "$LX" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}'
-    uci -q get "network.wgpeer_$LX.endpoint_host"
+    sget "network.wgpeer_$LX.endpoint_host"
     awk -F= '$1=="server_ip"{print $2}' "$RUNDIR/session.$LX" 2>/dev/null
   done | sort -u | tr '\n' ' '
 }
@@ -1522,10 +1523,12 @@ drop_net_sections() {
 # The network sections of the interface: persistent and RAM-staged, and the
 # endpoint host route
 forget_net() {
-  DNEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
+  DNEP="$(sget "network.$PIAWG_PEER.endpoint_host")"
   persist_run drop_net_sections
   uci -q revert "network.$PIAWG_IF"
   uci -q revert "network.$PIAWG_PEER"
+  uci -q -P "$SESSSTATE" revert "network.$PIAWG_IF"
+  uci -q -P "$SESSSTATE" revert "network.$PIAWG_PEER"
   if [ -n "$DNEP" ]; then
     while ip route del "$DNEP/32" 2>/dev/null; do :; done
   fi
@@ -1923,13 +1926,32 @@ migrate_config() {
   fi
 }
 
-# Set a staged (RAM) option only if its effective value differs
+# The session (key, address, server) is kept as RAM deltas in $SESSSTATE
+# (/var/state, tmpfs). The protocol scripts of netifd load their settings with
+# config_load, which reads that directory too; uci, rpcd and LuCI do not, so
+# the session is neither listed as an unsaved change nor committed by them.
+# netifd itself does not see it either: a running interface has to be
+# restarted (ifdown/ifup) to take it.
+sget() { uci -q -P "$SESSSTATE" get "$1"; }
+
+# Set a session option only if its effective value differs
 stage_set() {
-  [ "$(uci -q get "$1")" = "$2" ] && return 0
+  [ "$(sget "$1")" = "$2" ] && return 0
   # (revert first: a changed option must not pile up entries in RAM)
-  uci -q revert "$1"
-  uci -q set "$1=$2"
-  NETCHANGED=1
+  uci -q -P "$SESSSTATE" revert "$1"
+  uci -q -P "$SESSSTATE" set "$1=$2"
+  SESSCHANGED=1
+}
+
+# Versions before 1.4.0 kept the session as staged changes in /tmp/.uci (shown
+# by LuCI as unsaved): drop them
+unstage_legacy() {
+  [ -f "$UCISTAGEDIR/network" ] || return 0
+  for USO in "$PIAWG_IF.private_key" "$PIAWG_IF.addresses" "$PIAWG_PEER.public_key" "$PIAWG_PEER.endpoint_host" \
+    "$PIAWG_PEER.endpoint_port" "$PIAWG_IF.awg_jc" "$PIAWG_IF.awg_jmin" "$PIAWG_IF.awg_jmax" "$PIAWG_IF.awg_s1" \
+    "$PIAWG_IF.awg_s2" "$PIAWG_IF.awg_h1" "$PIAWG_IF.awg_h2" "$PIAWG_IF.awg_h3" "$PIAWG_IF.awg_h4"; do
+    uci -q revert "network.$USO"
+  done
 }
 
 # The persistent part of the interface and of the peer, as uci batch commands
@@ -2008,6 +2030,7 @@ ensure_iface() { persist_run ensure_iface_inner; }
 
 # Stage the session key, address and server (RAM only)
 stage_session() {
+  unstage_legacy
   stage_set "network.$PIAWG_IF.private_key" "$(session_get priv)"
   stage_set "network.$PIAWG_IF.addresses" "$(session_get peer_ip)"
   stage_set "network.$PIAWG_PEER.public_key" "$(session_get server_key)"
@@ -2023,9 +2046,9 @@ stage_session() {
 # Is the session what netifd would use?
 session_staged() {
   session_valid &&
-    [ "$(uci -q get "network.$PIAWG_IF.private_key")" = "$(session_get priv)" ] &&
-    [ "$(uci -q get "network.$PIAWG_PEER.public_key")" = "$(session_get server_key)" ] &&
-    [ "$(uci -q get "network.$PIAWG_PEER.endpoint_host")" = "$(session_get server_ip)" ]
+    [ "$(sget "network.$PIAWG_IF.private_key")" = "$(session_get priv)" ] &&
+    [ "$(sget "network.$PIAWG_PEER.public_key")" = "$(session_get server_key)" ] &&
+    [ "$(sget "network.$PIAWG_PEER.endpoint_host")" = "$(session_get server_ip)" ]
 }
 
 net_reload() {
@@ -2209,21 +2232,28 @@ set_netconf() {
   fi
 
   session_save "$WGPRIV"
-  NETCHANGED=''
-  OLDEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
+  NETCHANGED='' SESSCHANGED=''
+  OLDEP="$(sget "network.$PIAWG_PEER.endpoint_host")"
   ensure_iface
   stage_session
   # The host route for the endpoint is made before the interface can come up,
   # and kept while it is down: otherwise its first packets loop (see below)
   endpoint_route "$WGSERVIP" pin
   [ -z "$OLDEP" ] || [ "$OLDEP" = "$WGSERVIP" ] || ip route del "$OLDEP/32" 2>/dev/null
-  # netifd only rereads the config on a reload, which restarts a running
-  # interface whose settings changed
-  if [ -n "$NETCHANGED" ]; then
-    if [ -n "$APPLY" ] || ! wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
+  # netifd only rereads the config on a reload (which restarts a running
+  # interface whose settings changed); it does not see the session, which the
+  # protocol script reads when the interface comes up
+  if [ -n "$NETCHANGED" ] || [ -n "$SESSCHANGED" ]; then
+    if wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
+      if [ -n "$APPLY" ]; then
+        [ -z "$NETCHANGED" ] || net_reload
+        ifdown "$PIAWG_IF" >/dev/null 2>&1
+        ifup "$PIAWG_IF"
+      else
+        echo "Network settings changed; they apply at the next ifup (or use 'renew --apply')" >&3
+      fi
+    elif [ -n "$NETCHANGED" ]; then
       net_reload
-    else
-      echo "Network settings changed; they apply at the next ifup (or use 'renew --apply')" >&3
     fi
   fi
   return 0
@@ -2325,7 +2355,7 @@ start_try() {
   NEWKEY=''
   echo "Starting PIA ($(uci get "network.$PIAWG_PEER.description"))" >&3
   # Before the tunnel exists, so that there is no moment without it
-  endpoint_route "$(uci -q get "network.$PIAWG_PEER.endpoint_host")" pin
+  endpoint_route "$(sget "network.$PIAWG_PEER.endpoint_host")" pin
   ifup "$PIAWG_IF"
   sleep 1
   N=0
@@ -2396,7 +2426,7 @@ stop_wgpia() {
   echo "Stopping PIA$DESC" >&3
   ifdown "$PIAWG_IF" >/dev/null 2>&1
   # the host route pinned by endpoint_route
-  SEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")" && [ -n "$SEP" ] && ip route del "$SEP/32" 2>/dev/null
+  SEP="$(sget "network.$PIAWG_PEER.endpoint_host")" && [ -n "$SEP" ] && ip route del "$SEP/32" 2>/dev/null
   return 0
 }
 
@@ -2570,7 +2600,7 @@ hook_cmd() {
   if iface_exists "$2"; then
     PIAWG_IF="$2"
     set_ifvars
-    HEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
+    HEP="$(sget "network.$PIAWG_PEER.endpoint_host")"
     [ -n "$HEP" ] && endpoint_route "$HEP" pin
     # up with nothing registered: make the session, which restarts it
     session_staged || /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" renew --if-missing --apply
@@ -2580,7 +2610,7 @@ hook_cmd() {
       /bin/sh "$SCRIPTPATH" -i "$HX" renew --if-missing
       PIAWG_IF="$HX"
       set_ifvars
-      HEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
+      HEP="$(sget "network.$PIAWG_PEER.endpoint_host")"
       [ -n "$HEP" ] && endpoint_route "$HEP" pin
     done
   fi
