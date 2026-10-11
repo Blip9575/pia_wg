@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.1.4
+# Version: 1.1.5
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -15,7 +15,12 @@
 #
 #########
 
+<<<<<<< HEAD
 SCRIPTDL="https://raw.githubusercontent.com/Blip9575/pia_wg/release/pia_wg.sh"
+=======
+# shellcheck disable=SC2329  # persist_run calls some functions indirectly
+SCRIPTDL="https://raw.githubusercontent.com/bolemo/pia_wg/main/pia_wg.sh"
+>>>>>>> pia-multi-interface
 SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
 SCRIPTNAME="${SCRIPTPATH##*/}"
 CRON_TAG_WD='# pia watchdog' # (per interface: "# pia watchdog [name]"); cron entries are recognised by these tags, not by the file name
@@ -26,7 +31,7 @@ RENEW_SKIP=180        # seconds: a handshake this recent means the registration 
 RUNDIR='/var/run/pia' # temporary files (RAM); created on demand, mode 0700
 LOCKDIR="$RUNDIR/lock"
 LEGACYTOK="$RUNDIR/legacy.token"                             # legacy 24h token (RAM only; one per account)
-UCIP="uci -q -t $RUNDIR/persist"                             # view of the persistent config only (ignores the RAM-staged session)
+UCISTAGE='/tmp/.uci/network'                                 # where uci keeps the RAM-staged (uncommitted) changes of the network package
 WGPLACEHOLDER='Hy+p7zrRBZWl5uBqhcFvnvMrRWb7Glhq6P5xe2ZkyHw=' # fixed, never registered: keeps wireguard.sh from generating (and saving) a key
 LOCK_WAIT=120                                                # seconds a manual command waits for another run
 LOCK_STEAL=900                                               # seconds after which a run still holding the lock is considered stuck
@@ -55,8 +60,7 @@ rundir_init() {
   LOCKDIR="$RUNDIR/lock"
   CACHERAMDIR="$RUNDIR/cache"
   LEGACYTOK="$RUNDIR/legacy.token"
-  UCIP="uci -q -t $RUNDIR/persist"
-  mkdir -p "$RUNDIR/persist" "$RUNDIR/ucid" "$RUNDIR/ucid.t" 2>/dev/null
+  mkdir -p "$RUNDIR/ucid" "$RUNDIR/ucid.t" 2>/dev/null
   for RF in "$RUNDIR"/*.fifo "$RUNDIR"/*.resp "$RUNDIR"/*.tmp; do
     [ -e "$RF" ] || continue
     RP="${RF##*/}"
@@ -1067,6 +1071,24 @@ set_iface() {
   return 0
 }
 
+drop_net_sections() {
+  uci -q delete "network.$PIAWG_IF"
+  uci -q delete "network.$PIAWG_PEER"
+  uci -q commit network
+}
+
+# The network sections of the interface: persistent and RAM-staged, and the
+# endpoint host route
+forget_net() {
+  DNEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
+  persist_run drop_net_sections
+  uci -q revert "network.$PIAWG_IF"
+  uci -q revert "network.$PIAWG_PEER"
+  if [ -n "$DNEP" ]; then
+    while ip route del "$DNEP/32" 2>/dev/null; do :; done
+  fi
+}
+
 # Rename the interface being handled ($1: the new name); its network sections
 # are removed (they are made again at the next start or renew)
 rename_iface() {
@@ -1083,9 +1105,7 @@ rename_iface() {
     return 1
   }
   ifdown "$PIAWG_IF" >/dev/null 2>&1
-  uci -q delete "network.$PIAWG_IF"
-  uci -q delete "network.$PIAWG_PEER"
-  uci -q commit network
+  forget_net
   uci -q rename "pia.$PIAWG_IF=$1"
   uci -q commit pia
   watchdog_remove
@@ -1105,9 +1125,7 @@ remove_iface() {
   set_ifvars
   watchdog_remove
   ifdown "$PIAWG_IF" >/dev/null 2>&1
-  uci -q delete "network.$PIAWG_IF"
-  uci -q delete "network.$PIAWG_PEER"
-  uci -q commit network
+  forget_net
   uci -q delete "pia.$PIAWG_IF"
   uci -q commit pia
   rm -f "$SESSION"
@@ -1214,6 +1232,11 @@ migrate_names() {
   return 0
 }
 
+drop_old_peer() {
+  uci -q delete network.wgpeer_pia
+  uci -q commit network
+}
+
 # /etc/config/pia_wg -> /etc/config/pia (one section per interface)
 migrate_config() {
   MIGIF="$(uci -q get pia_wg.@iface[0].name)"
@@ -1268,8 +1291,7 @@ migrate_config() {
     rm -f "$OLDCONF"
     # the peer used to be one constant section name; it is wgpeer_<interface> now
     if [ "$(uci -q get network.wgpeer_pia)" = "wireguard_$MIGIF" ]; then
-      uci -q delete network.wgpeer_pia
-      uci -q commit network
+      persist_run drop_old_peer
     fi
     echo "Configuration moved from $OLDCONF to $PIACONF (interface $MIGIF)"
   else
@@ -1282,6 +1304,8 @@ migrate_config() {
 # Set a staged (RAM) option only if its effective value differs
 stage_set() {
   [ "$(uci -q get "$1")" = "$2" ] && return 0
+  # (revert first: a changed option must not pile up entries in RAM)
+  uci -q revert "$1"
   uci -q set "$1=$2"
   NETCHANGED=1
 }
@@ -1309,11 +1333,32 @@ persist_batch() {
 
 }
 
+# Run a command with the RAM-staged network changes (key, address, server)
+# set aside: uci loads them into everything it reads and commits, so reading
+# or committing the persistent config with them in place would write the key
+# to the flash. They are put back afterwards.
+persist_run() {
+  PRSAVED=''
+  if [ -f "$UCISTAGE" ]; then
+    PRSAVED="$RUNDIR/staged.$$.tmp"
+    mv "$UCISTAGE" "$PRSAVED"
+  fi
+  "$@"
+  PRRC=$?
+  if [ -n "$PRSAVED" ] && [ -f "$PRSAVED" ]; then
+    if [ -f "$UCISTAGE" ]; then
+      cat "$PRSAVED" "$UCISTAGE" >"$PRSAVED.m" && mv "$PRSAVED.m" "$UCISTAGE" && rm -f "$PRSAVED"
+    else
+      mv "$PRSAVED" "$UCISTAGE"
+    fi
+  fi
+  return $PRRC
+}
+
 # Create or update the persistent interface and peer, writing the flash only
 # if what is there differs from what is wanted.
-ensure_iface() {
-  # own change directories: nothing must land in the RAM-staged session
-  rm -f "$RUNDIR/persist"/* "$RUNDIR/ucid.t"/*
+ensure_iface_inner() {
+  rm -f "$RUNDIR/ucid.t"/*
   : >"$RUNDIR/ucid/network"
   UCIS="uci -q -c $RUNDIR/ucid -t $RUNDIR/ucid.t"
   {
@@ -1322,16 +1367,18 @@ ensure_iface() {
   } | $UCIS batch >/dev/null
   WANT="$($UCIS show network | sort)"
   HAVE="$( (
-    $UCIP show "network.$PIAWG_IF"
-    $UCIP show "network.$PIAWG_PEER"
+    uci -q show "network.$PIAWG_IF"
+    uci -q show "network.$PIAWG_PEER"
   ) | sort)"
   [ "$WANT" = "$HAVE" ] && return 0
   {
     persist_batch
     echo "commit network"
-  } | $UCIP batch >/dev/null
+  } | uci -q batch >/dev/null
   NETCHANGED=1
 }
+
+ensure_iface() { persist_run ensure_iface_inner; }
 
 # Stage the session key, address and server (RAM only)
 stage_session() {
