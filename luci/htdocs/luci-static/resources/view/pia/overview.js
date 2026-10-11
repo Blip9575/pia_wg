@@ -103,10 +103,14 @@ const DNSOPTS = [
 	[ 'mace', _('PIA with MACE'), _('Blocks ads, trackers and malware') ]
 ];
 
-const MTUOPTS = [
-	[ 'std', _('Standard'), _('Recommended for IPv4 + IPv6 traffic') ],
-	[ 'small', _('Small'), _('Improve compatibility for mobile networks') ]
-];
+// the packet sizes: standard follows the WAN (st.std_mtu), the others are fixed
+function mtuOpts(st) {
+	return [
+		[ 'std', _('Standard (%d)').format(st.std_mtu), _('Recommended for IPv4 + IPv6 traffic') ],
+		[ 'optimal', _('Optimal (%d)').format((st.optimal_mtu || 1440)), _('IPv4 only via WAN 1500 or PPPoE 1508.') ],
+		[ 'small', _('Small (%d)').format(st.small_mtu), _('Improve compatibility for mobile networks') ]
+	];
+}
 
 function dnsFor(st, mace, streaming) {
 	const d = st.dns_servers;
@@ -523,7 +527,7 @@ return view.extend({
 			{
 				title: _('Packet size'),
 				render: () => {
-					const c = selectHelp(MTUOPTS, d.mtu);
+					const c = selectHelp(mtuOpts(st), d.mtu);
 					return { node: field(_('Packet size (MTU)'), c.node, c.help), collect: () => { d.mtu = c.node.value; } };
 				}
 			},
@@ -569,7 +573,7 @@ return view.extend({
 						[ _('Protocol Selection'), PROTOS.filter(p => p[0] == d.proto)[0][1] ],
 						[ _('Region Selection'), d.regionName + (d.fast ? ' · ' + _('fastest of its country at each start') : '') ],
 						[ _('DNS servers'), dnsLabel(st, dnsFor(st, d.dns == 'mace', d.streaming)) ],
-						[ _('Packet size'), d.mtu == 'std' ? _('Standard (%d)').format(st.std_mtu) : _('Small (%d)').format(st.small_mtu) ],
+						[ _('Packet size'), mtuOpts(st).find(o => o[0] == d.mtu)[1] ],
 						[ _('Default route'), d.route ? _('yes') : _('no') ],
 						[ _('Firewall'), d.firewall ? _('zone %s, forwarding from: %s').format(d.name, d.forward.join(', ') || _('none')) : _('none') ]
 					];
@@ -641,8 +645,8 @@ return view.extend({
 		if (i.dip) protoSel.disabled = true;
 		const dnsCtl = selectHelp(DNSOPTS, i.dns == 'mace' ? 'mace' : 'standard');
 		const cur = i.mtu;
-		const custom = (cur && cur != st.std_mtu && cur != st.small_mtu) ? [ [ String(cur), _('Custom (%d)').format(cur), '' ] ] : [];
-		const mtuCtl = selectHelp(MTUOPTS.concat(custom), !cur || cur == st.std_mtu ? 'std' : cur == st.small_mtu ? 'small' : String(cur));
+		const custom = (cur && cur != st.std_mtu && cur != (st.optimal_mtu || 1440) && cur != st.small_mtu) ? [ [ String(cur), _('Custom (%d)').format(cur), '' ] ] : [];
+		const mtuCtl = selectHelp(mtuOpts(st).concat(custom), !cur || cur == st.std_mtu ? 'std' : cur == (st.optimal_mtu || 1440) ? 'optimal' : cur == st.small_mtu ? 'small' : String(cur));
 		const holder = st.interfaces.find(o => o.name != i.name && o.default_route);
 		const routeCb = checkbox(i.default_route);
 		if (holder) routeCb.disabled = true;
