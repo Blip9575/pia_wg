@@ -197,6 +197,8 @@ return view.extend({
 		const cacheLine = [ E('span', c.regions
 			? _('%d regions, checked %s').format(c.regions, ago(when ? st.now - when : null))
 			: _('no servers list yet')) ];
+		if (st.probe && st.probe.state == 'running')
+			cacheLine.push(E('small', ' · ' + _('checking which regions need the legacy token…')));
 		const cacheWarn = [];
 		if (c.regions && when && st.now - when > 3 * 86400)
 			cacheWarn.push(_('the list has not been refreshed for over 3 days'));

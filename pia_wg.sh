@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.38
+# Version: 1.0.39
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -582,7 +582,11 @@ set_cache() {
 # before it checks the key, even when the request then fails. The server the
 # tunnel is connected to is therefore never asked (it would drop the tunnel);
 # a region is judged on its other servers, or keeps its previous result.
+#
+# legacy_probe [CC] checks only the regions of the country CC and merges the
+# result into the list (a '#c CC <epoch>' line records when).
 legacy_probe() {
+  PCC="$1"
   CD="$(cache_dir)"
   [ -s "$CD/servers.json" ] || {
     echo "No servers list yet; run 'cache refresh' first" >&3
@@ -601,13 +605,24 @@ legacy_probe() {
   LU="$(uci -q get pia.vpntoken.user)"
   LP="$(uci -q get pia.vpntoken.pass)"
   PROBETMP="$CD/legacy.list.tmp"
-  echo "# $(date +%s)" >"$PROBETMP"
+  if [ -z "$PCC" ]; then
+    echo "# $(date +%s)" >"$PROBETMP"
+  else
+    PCIDS="$(jq -r --arg c "$PCC" '.regions[] | select(.country == $c) | .id' "$CD/servers.json" 2>/dev/null)"
+    {
+      echo "# $(legacy_stamp)"
+      grep "^#c " "$CD/legacy.list" 2>/dev/null | grep -v "^#c $PCC "
+      echo "#c $PCC $(date +%s)"
+      grep -v '^#' "$CD/legacy.list" 2>/dev/null | grep -vxF "$PCIDS"
+    } >"$PROBETMP"
+  fi
   # Run in the background and wait for it, so that a signal is handled at once
   # (a trap only runs after the foreground command ends); the loop stops by
   # itself when this run is gone
   MAINPID=$$
   {
-    jq -r '.regions[] | select(.offline == false) | select((.servers.wg // []) | length > 0)
+    jq -r --arg c "$PCC" '.regions[] | select(.offline == false) | select($c == "" or .country == $c)
+    | select((.servers.wg // []) | length > 0)
     | "\(.id) " + (.servers.wg | map("\(.ip),\(.cn)") | join(" "))' "$CD/servers.json" |
       while read -r RID SRVS; do
         kill -0 "$MAINPID" 2>/dev/null || exit 1
@@ -678,9 +693,17 @@ legacy_ids() {
   grep -v '^#' "$(cache_dir)/legacy.list" 2>/dev/null | tr '\n' ' '
 }
 
-# Epoch of the last legacy_probe, empty if never
+# Epoch of the last full legacy_probe, empty if never
 legacy_stamp() {
   sed -n '1s/^# //p' "$(cache_dir)/legacy.list" 2>/dev/null
+}
+
+# Is the result for the country $1 recent (a full or a per country check)?
+legacy_country_fresh() {
+  LCF="$(legacy_stamp)"
+  [ -n "$LCF" ] && [ $(($(date +%s) - LCF)) -lt "$LEGACY_MAXAGE" ] && return 0
+  LCF="$(sed -n "s/^#c $1 //p" "$(cache_dir)/legacy.list" 2>/dev/null | head -n 1)"
+  [ -n "$LCF" ] && [ $(($(date +%s) - LCF)) -lt "$LEGACY_MAXAGE" ]
 }
 
 # Numbered list of the online WireGuard regions, (L) marking those needing the
@@ -2740,7 +2763,7 @@ print_usage() {
   echo "    - cache install      : install the cache refresh (cron, every 6 hours)"
   echo "    - cache remove       : remove the cache refresh"
   echo "    - cache show         : show the offline cache"
-  echo "    - cache probe        : check which regions need the legacy token"
+  echo "    - cache probe [CC]   : check which regions (of the country CC) need the legacy token"
   echo "    - log show           : display the log"
   echo "    - log clear          : clear the log"
   echo "    - log path           : set a custom Directory Path for the log"
@@ -2849,7 +2872,7 @@ api_status() {
     --arg dns "$PIA_DNS" --arg dnsso "$PIA_DNS_SO" --arg dnsmace "$PIA_DNS_MACE" --arg dnssomace "$PIA_DNS_SO_MACE" \
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
     --arg cdir "$ACD" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
-    --argjson job "$(api_job_json _global)" \
+    --argjson job "$(api_job_json _global)" --argjson probe "$(api_job_json _probe)" \
     '{version: $version, awg: ($awg == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
       zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan,
@@ -2857,7 +2880,7 @@ api_status() {
       dns_servers: {standard: $dns, streaming: $dnsso, mace: $dnsmace, streaming_mace: $dnssomace},
       cache: {regions: $regions, updated: ($listts | tonumber? // 0), checked: ($checked | tonumber? // 0),
               dir: $cdir, ram: ($cram == 1), cron: ($ccron == 1), meta: ($cmeta | tonumber? // 0)},
-      job: $job, now: (now | floor), interfaces: .}'
+      job: $job, probe: $probe, now: (now | floor), interfaces: .}'
 }
 
 # api_regions <wireguard|amneziawg>: the regions that have servers of that protocol
@@ -2903,11 +2926,12 @@ api_job() {
   AJK="$1"
   shift
   case "$AJK" in
-  _global) ;;
+  _global | _probe) ;;
   *) valid_ifname "$AJK" || api_fail "Invalid interface name" ;;
   esac
   case "$*" in
   "-i $AJK start" | "-i $AJK restart" | "-i $AJK stop" | "-i $AJK renew --force" | 'cache refresh' | 'api refresh-list' | 'api login') ;;
+  'cache probe '[A-Z][A-Z]) [ "$AJK" = '_probe' ] || api_fail "Command not allowed" ;;
   *) api_fail "Command not allowed" ;;
   esac
   AJF="$RUNDIR/job.$AJK"
@@ -3096,6 +3120,14 @@ api_iface_save() {
     fi
     uci -q set "pia.$AN.dns_asked=1"
     uci -q commit pia
+  fi
+  # a new region: check in the background which of its country's regions need
+  # the legacy token (the next start waits for it instead of being refused)
+  if [ -n "$A_REGION" ]; then
+    APC="$(echo "$PIAREGIONS" | jq -r --arg i "$A_REGION" '.[] | select(.id == $i) | .country' | head -n 1)"
+    if [ -n "$APC" ] && ! legacy_country_fresh "$APC"; then
+      (api_job _probe cache probe "$APC") >/dev/null 2>&1
+    fi
   fi
   api_ok
 }
@@ -3328,7 +3360,16 @@ case "$1" in
   'install') cache_install ;;
   'remove') cache_remove ;;
   'show') cache_show ;;
-  'probe') legacy_probe && echo "Regions needing the legacy token: $(legacy_ids)" ;;
+  'probe')
+    case "$3" in
+    '' | [A-Z][A-Z]) ;;
+    *)
+      echo "The country must be a two letter code (GB, US…)"
+      exit 1
+      ;;
+    esac
+    legacy_probe "$3" && echo "Regions needing the legacy token: $(legacy_ids)"
+    ;;
   *)
     echo "Unknown cache subcommand '$2'!"
     print_usage
