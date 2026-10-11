@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.30
+# Version: 1.0.31
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -452,6 +452,7 @@ EOM
       mv "$TMP" "$CD/servers.json"
       LISTRES='updated'
     fi
+    : >"$CD/servers.checked" # when the list was last checked (servers.json only changes with the list)
   else
     rm -f "$TMP"
     LISTRES='failed'
@@ -2758,13 +2759,21 @@ api_iface_json() {
 
 api_status() {
   AZONES="$(uci -q show firewall | sed -n "s/^firewall\\.[^.]*\\.name='\\([^']*\\)'\$/\\1/p" | tr '\n' ' ')"
-  ASERV="$(cache_dir)/servers.json"
+  ACD="$(cache_dir)"
+  ASERV="$ACD/servers.json"
   ASN=0
   ASTS=0
+  ASCK=0
   if [ -s "$ASERV" ]; then
     ASN="$(jq '.regions | length' "$ASERV" 2>/dev/null)"
     ASTS="$(date -r "$ASERV" +%s 2>/dev/null)"
+    ASCK="$(date -r "$ACD/servers.checked" +%s 2>/dev/null)"
   fi
+  ARAM=0
+  [ "$ACD" = "$CACHERAMDIR" ] && ARAM=1
+  ACRON=0
+  cache_installed && ACRON=1
+  AMETA="$(grep -c . "$ACD/meta.list" 2>/dev/null)"
   AAWG=0
   awg_available && AAWG=1
   {
@@ -2774,13 +2783,15 @@ api_status() {
     --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
     --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg stdmtu "$(std_mtu)" \
     --arg small "$PIA_MTU_SMALL" --arg mace "$PIA_MACE_DNS" \
-    --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" \
+    --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
+    --arg cdir "$ACD" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
     --argjson job "$(api_job_json _global)" \
     '{version: $version, awg: ($awg == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
       zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan,
       std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), mace_dns: $mace,
-      cache: {regions: $regions, updated: ($listts | tonumber? // 0)},
+      cache: {regions: $regions, updated: ($listts | tonumber? // 0), checked: ($checked | tonumber? // 0),
+              dir: $cdir, ram: ($cram == 1), cron: ($ccron == 1), meta: ($cmeta | tonumber? // 0)},
       job: $job, now: (now | floor), interfaces: .}'
 }
 
