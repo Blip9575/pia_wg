@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.1.7
+# Version: 1.1.8
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -284,9 +284,9 @@ pia_wan() {
   WANDEV=''
   # where the tunnel's packets leave, if it has a peer
   if wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
-    WEP="$(wgt "$PIAWG_IF" show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit}')"
+    WEP="$(wgt "$PIAWG_IF" show "$PIAWG_IF" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2; exit}')"
     if [ -n "$WEP" ]; then
-      WMK="$(wgt "$PIAWG_IF" show "$PIAWG_IF" fwmark)"
+      WMK="$(wgt "$PIAWG_IF" show "$PIAWG_IF" fwmark 2>/dev/null)"
       [ "$WMK" = 'off' ] && WMK=''
       WANDEV="$(ip route get "$WEP" ${WMK:+mark "$WMK"} 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
       [ "$WANDEV" = "$PIAWG_IF" ] && WANDEV=''
@@ -2087,8 +2087,8 @@ stop_wgpia() {
 
 check_wg() {
   if wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
-    PIAWG_EP="$(wgt "$PIAWG_IF" show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit;}')"
-    PIAWG_MK="$(wgt "$PIAWG_IF" show "$PIAWG_IF" fwmark)"
+    PIAWG_EP="$(wgt "$PIAWG_IF" show "$PIAWG_IF" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2; exit;}')"
+    PIAWG_MK="$(wgt "$PIAWG_IF" show "$PIAWG_IF" fwmark 2>/dev/null)"
     [ "$PIAWG_MK" = "off" ] && PIAWG_MK=''
     # never leave the endpoint routed through the tunnel (routing loop)
     if ! endpoint_route "$PIAWG_EP" check; then
