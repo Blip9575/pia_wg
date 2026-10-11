@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.16
+# Version: 1.0.17
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1306,18 +1306,23 @@ check_wg() {
   fi
 
   echo "Region is: $(uci get network.$PIAWG_PEER.description)"
+  # Probe PIA's own in-tunnel DNS address (handed out by addKey): the probe is
+  # an ICMP packet that never leaves the tunnel and names no third party.
   # The first hop does not always answer TTL expiry, so also try a plain ping
-  if traceroute -i "$PIAWG_IF" -q1 -m1 1.1.1.1 | grep -q ' ms' ||
-    ping -q -c1 -n -W 3 -I "$PIAWG_IF" 1.1.1.1 >/dev/null 2>&1; then
+  CHK="$(uci -q get "network.$PIAWG_IF.dns" | awk '{print $1}')"
+  [ -n "$CHK" ] || CHK='10.0.0.243'
+  if traceroute -i "$PIAWG_IF" -q1 -m1 "$CHK" | grep -q ' ms' ||
+    ping -q -c1 -n -W 3 -I "$PIAWG_IF" "$CHK" >/dev/null 2>&1; then
     echo "Connectivity through PIA: OK"
   elif ping -q -c1 -n -I "$WAN_IF" "$PIAWG_EP" >/dev/null; then
     echo "Connectivity through PIA: NOK" >&3
     return 1
-  elif traceroute -i "$WAN_IF" -q1 -m1 1.1.1.1 | grep -q ' ms'; then
+  elif WAN_GW="$(ip route show default dev "$WAN_IF" | awk '{for(i=1;i<NF;i++) if($i=="via"){print $(i+1); exit}}')" &&
+    [ -n "$WAN_GW" ] && ping -q -c1 -n -W 3 -I "$WAN_IF" "$WAN_GW" >/dev/null 2>&1; then
     echo "Access to PIA Endpoint through WAN: NOK!" >&3
     return 1
   else
-    echo "Connectivity through PIA: NOK" >&3
+    echo "Connectivity through PIA: NOK (WAN gateway unreachable)" >&3
     return 1
   fi
 }

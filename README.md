@@ -7,7 +7,7 @@ A script to setup and run PIA through WireGuard on OpenWrt
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.0.16
+1.0.17
 
 ## Install
   - Connect to your OpenWrt router with SSH
@@ -72,6 +72,7 @@ The network interface is named `wg_pia` by default. To use another name (letters
 ## Watchdog
 The script can install a watchdog that will check regularly the status and restart the VPN if needed.
 <br/> For that, just use `--watchdog` when using `start`or `restart`, or run the command `./pia_wg.sh watchdog install`
+<br/> The health check pings PIA's own in-tunnel DNS address (the one `addKey` hands out, normally 10.0.0.243) through the tunnel; it never contacts a third-party address, and it sends no DNS query.
 <br/> The cron entries are recognised by their `# pia_wg …` tags and written with the path the script is run from, so the script can have any name and location; after moving it, run `watchdog install` (and `cache install`) from the new location and the old entries are replaced.
 <br/> To unsinstall/remove the watchdog, use `./pia_wg.sh watchdog remove`; when `./pia_wg.sh stop` is used, the watchdog is automatically removed
 
