@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.18
+# Version: 1.0.19
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -17,32 +17,25 @@
 SCRIPTDL="https://raw.githubusercontent.com/bolemo/pia_wg/main/pia_wg.sh"
 SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
 SCRIPTNAME="${SCRIPTPATH##*/}"
-CRON_TAG_WD='# pia_wg watchdog' # cron entries are recognised by these tags, not by the file name
-CRON_TAG_CACHE='# pia_wg cache'
-CRON_TAG_RENEW='# pia_wg renew'
-HOOKFILE='/etc/hotplug.d/iface/80-pia_wg'
+CRON_TAG_WD='# pia watchdog' # (per interface: "# pia watchdog [name]"); cron entries are recognised by these tags, not by the file name
+CRON_TAG_CACHE='# pia cache'
+CRON_TAG_RENEW='# pia renew'
+HOOKFILE='/etc/hotplug.d/iface/80-pia'
 RENEW_SKIP=180        # seconds: a handshake this recent means the registration is alive
 RUNDIR='/var/run/pia' # temporary files (RAM); created on demand, mode 0700
-LOCKDIR="$RUNDIR/pia_wg.lock"
-SESSION="$RUNDIR/session"                                    # key and server settings of this session (RAM only, like the official apps)
-LEGACYTOK="$RUNDIR/legacy.token"                             # legacy 24h token (RAM only)
-WDFAIL="$RUNDIR/watchdog.fail"                               # watchdog back-off state
-RENEWFAIL="$RUNDIR/renew.fail"                               # time of the last failed renew
+LOCKDIR="$RUNDIR/lock"
+LEGACYTOK="$RUNDIR/legacy.token"                             # legacy 24h token (RAM only; one per account)
 UCIP="uci -q -t $RUNDIR/persist"                             # view of the persistent config only (ignores the RAM-staged session)
 WGPLACEHOLDER='Hy+p7zrRBZWl5uBqhcFvnvMrRWb7Glhq6P5xe2ZkyHw=' # fixed, never registered: keeps wireguard.sh from generating (and saving) a key
 LOCK_WAIT=120                                                # seconds a manual command waits for another run
 LOCK_STEAL=900                                               # seconds after which a run still holding the lock is considered stuck
 LOGDEFPATH='/var/log/pia'
-LOGNAME='pia_wg_watchdog.log'
-PIACONF='/etc/config/pia_wg'
-PIAWG_IF="$(uci -q get pia_wg.@iface[0].name)" || PIAWG_IF='wg_pia'
-case "$PIAWG_IF" in
-'' | *[!A-Za-z0-9_]*) PIAWG_IF='wg_pia' ;;
-esac
-[ ${#PIAWG_IF} -le 15 ] || PIAWG_IF='wg_pia'
-PIAWG_PEER='wgpeer_pia'
-CACHEDEFDIR='/mnt/usb/pia_wg' # external storage, to spare the router flash
-CACHERAMDIR="$RUNDIR/cache"   # used when the external storage is not mounted
+LOGNAME='pia.log'
+PIACONF='/etc/config/pia' # one section per interface, named like it; the account, tokens, cache and log are shared
+RESERVED_NAMES=' account apitoken vpntoken cache log '
+PIAWG_IF='wg_pia'           # the interface being handled (-i NAME, or the only one configured)
+CACHEDEFDIR='/mnt/usb/pia'  # external storage, to spare the router flash
+CACHERAMDIR="$RUNDIR/cache" # used when the external storage is not mounted
 SERVERLIST_URL='https://serverlist.piaservers.net/vpninfo/servers/v6'
 META_MAX=6           # verified meta servers to keep in the cache
 META_PROBES=40       # max meta servers to probe per refresh
@@ -58,12 +51,9 @@ rundir_init() {
     (umask 077 && mkdir -p "$RUNDIR")
   fi
   chmod 700 "$RUNDIR" 2>/dev/null
-  LOCKDIR="$RUNDIR/pia_wg.lock"
+  LOCKDIR="$RUNDIR/lock"
   CACHERAMDIR="$RUNDIR/cache"
-  SESSION="$RUNDIR/session"
   LEGACYTOK="$RUNDIR/legacy.token"
-  WDFAIL="$RUNDIR/watchdog.fail"
-  RENEWFAIL="$RUNDIR/renew.fail"
   UCIP="uci -q -t $RUNDIR/persist"
   mkdir -p "$RUNDIR/persist" "$RUNDIR/ucid" "$RUNDIR/ucid.t" 2>/dev/null
   for RF in "$RUNDIR"/*.fifo "$RUNDIR"/*.resp "$RUNDIR"/*.tmp; do
@@ -78,10 +68,59 @@ rundir_init() {
   done
 }
 
-# Is this pid a live pia_wg.sh run (and not a reused pid)?
+# Endpoints in use by the interfaces: live ones and those staged
+live_endpoints() {
+  for LX in $(iface_list) "$PIAWG_IF"; do
+    wg show "$LX" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}'
+    uci -q get "network.wgpeer_$LX.endpoint_host"
+  done | sort -u | tr '\n' ' '
+}
+
+# Servers in use by the other interfaces (live, staged or registered)
+sibling_endpoints() {
+  for LX in $(iface_list); do
+    [ "$LX" = "$PIAWG_IF" ] && continue
+    wg show "$LX" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}'
+    uci -q get "network.wgpeer_$LX.endpoint_host"
+    awk -F= '$1=="server_ip"{print $2}' "$RUNDIR/session.$LX" 2>/dev/null
+  done | sort -u | tr '\n' ' '
+}
+
+# The regions of all the interfaces (their meta servers are kept in the cache)
+all_regions() {
+  for LX in $(iface_list); do uci -q get "pia.$LX.region_id"; done | sort -u | tr '\n' ' '
+}
+
+# The interfaces in the config: one section of type 'interface' per interface
+iface_list() { uci -q show pia 2>/dev/null | sed -n 's/^pia\.\([A-Za-z0-9_]*\)=interface$/\1/p'; }
+iface_exists() { [ "$(uci -q get "pia.$1")" = 'interface' ]; }
+
+valid_ifname() {
+  case "$1" in
+  '' | *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  [ ${#1} -le 15 ] || return 1
+  case "$RESERVED_NAMES" in
+  *" $1 "*) return 1 ;;
+  esac
+  return 0
+}
+
+# Names and files that depend on the interface being handled
+set_ifvars() {
+  PIAWG_PEER="wgpeer_$PIAWG_IF"
+  SESSION="$RUNDIR/session.$PIAWG_IF"
+  WDFAIL="$RUNDIR/watchdog.$PIAWG_IF.fail"
+  RENEWFAIL="$RUNDIR/renew.$PIAWG_IF.fail"
+  CRON_TAG_WD="# pia watchdog [$PIAWG_IF]"
+  # tunnels (ours, any other WireGuard interface): never "the WAN"
+  PIAIFS=" $(iface_list | tr '\n' ' ') $PIAWG_IF $(wg show interfaces 2>/dev/null | tr '\t' ' ') "
+}
+
+# Is this pid a live pia.sh run (and not a reused pid)?
 pid_is_pia() {
   kill -0 "$1" 2>/dev/null &&
-    { grep -qF "$SCRIPTNAME" "/proc/$1/cmdline" 2>/dev/null || grep -qF pia_wg "/proc/$1/cmdline" 2>/dev/null; }
+    { grep -qF "$SCRIPTNAME" "/proc/$1/cmdline" 2>/dev/null || grep -qE 'pia(_wg)?\.sh' "/proc/$1/cmdline" 2>/dev/null; }
 }
 
 # lock_take <command...>: serialise the runs that act on the tunnel and tokens.
@@ -115,14 +154,14 @@ lock_take() {
       continue
     else
       if [ "$1" = 'start' ]; then
-        echo "Another pia_wg.sh run is in progress (pid $LPID: $LCMD); skipping" >&3
+        echo "Another pia.sh run is in progress (pid $LPID: $LCMD); skipping" >&3
         exit 0
       fi
       if [ $LW -ge "$LOCK_WAIT" ]; then
-        echo "Another pia_wg.sh run (pid $LPID: $LCMD) is still in progress after ${LOCK_WAIT}s; giving up" >&3
+        echo "Another pia.sh run (pid $LPID: $LCMD) is still in progress after ${LOCK_WAIT}s; giving up" >&3
         exit 75
       fi
-      [ $LW -eq 0 ] && echo "Waiting for another pia_wg.sh run (pid $LPID: $LCMD)…" >&3
+      [ $LW -eq 0 ] && echo "Waiting for another pia.sh run (pid $LPID: $LCMD)…" >&3
     fi
     LW=$((LW + 1))
     sleep 1
@@ -175,22 +214,21 @@ set_logpath() {
   if [ "$1" ]; then
     LOGPATH="$1"
   else
-    LOGPATH="$(uci -q get pia_wg.@log[0].path)"
+    LOGPATH="$(uci -q get pia.log.path)"
     echo "Current Directory Path is: $LOGPATH"
     printf "Enter the Directory Path for the log (press enter to keep current one): "
     read -r NEWLOGPATH
     [ -z "$NEWLOGPATH" ] || LOGPATH="$NEWLOGPATH"
   fi
   uci -q batch <<EOI >/dev/null
-    delete pia_wg.@log[0]
-    add pia_wg log
-    set pia_wg.@log[0].path="$LOGPATH"
-    commit pia_wg.@log[0]
+    set pia.log=log
+    set pia.log.path="$LOGPATH"
+    commit pia
 EOI
 }
 
 logfile() {
-  if LOGPATH=$(uci -q get pia_wg.@log[0].path); then
+  if LOGPATH=$(uci -q get pia.log.path); then
     [ -d "$LOGPATH" ] || mkdir -p "$LOGPATH" 2>/dev/null
     echo "$LOGPATH/$LOGNAME"
   else
@@ -219,20 +257,20 @@ pia_wan() {
     fi
   fi
   # otherwise (no peer yet): the best default route that is not the tunnel
-  [ -n "$WANDEV" ] || WANDEV="$(ip -4 route show default | awk -v t="$PIAWG_IF" '
+  [ -n "$WANDEV" ] || WANDEV="$(ip -4 route show default | awk -v t="$PIAIFS" '
     {
       dev = ""; m = 0
       for (i = 1; i <= NF; i++) {
         if ($i == "dev") dev = $(i + 1)
         if ($i == "metric") m = $(i + 1)
       }
-      if (dev != "" && dev != t) print m, dev
+      if (dev != "" && index(t, " " dev " ") == 0 && dev !~ /^(tun|tap|ppp|wg)/) print m, dev
     }' | sort -n | awk 'NR==1{print $2}')"
   return 0
 }
 
 cache_dir() {
-  CACHEDIR="$(uci -q get pia_wg.@cache[0].dir)" || CACHEDIR="$CACHEDEFDIR"
+  CACHEDIR="$(uci -q get pia.cache.dir)" || CACHEDIR="$CACHEDEFDIR"
   if [ ! -d "$CACHEDIR" ]; then
     # Under /mnt or /media but not on a mounted filesystem (e.g. USB storage
     # not mounted yet): use RAM rather than writing to the router flash
@@ -302,7 +340,7 @@ EOC
 meta_candidates() {
   SL="$(cache_dir)/servers.json"
   [ -s "$SL" ] || return
-  jq -r --arg regs "$(uci -q get pia_wg.@region[0].id) $(uci -q get pia_wg.@cache[0].regions)" '
+  jq -r --arg regs "$(all_regions) $(uci -q get pia.cache.regions)" '
     ($regs | split(" ") | map(select(length > 0))) as $r
     | [.regions[] | select(.offline == false)]
     | map(select(.id as $i | $r | index($i))) + map(select(.id as $i | $r | index($i) | not))
@@ -383,9 +421,9 @@ EOM
   fi
 }
 
-# Days of validity left for the token stored in pia_wg.@<section>[0]
+# Days of validity left for the token stored in the section pia.<name>
 token_days() {
-  TDE="$(uci -q get "pia_wg.@$1[0].expires")"
+  TDE="$(uci -q get "pia.$1.expires")"
   if [ "${TDE:-0}" -gt 0 ]; then
     echo "$(((TDE - $(date +%s)) / 86400)) days"
   else
@@ -415,7 +453,7 @@ cache_refresh() {
     R=1
   fi
   # Renew PIA tokens ahead of expiry
-  if uci -q get pia_wg.@user[0] >/dev/null; then
+  if uci -q get pia.account >/dev/null; then
     if pia_tokens renew; then
       echo "  Tokens       : API token valid for $(token_days apitoken), VPN token for $(token_days vpntoken)" >&3
     else
@@ -459,7 +497,7 @@ cache_show() {
   cache_installed && echo "Cache refresh (cron) installed: YES" || echo "Cache refresh (cron) installed: NO"
   if [ -s "$CD/servers.json" ]; then
     echo "Servers list: $(jq '.regions | length' "$CD/servers.json") regions, updated $(date -r "$CD/servers.json")"
-    PIAREGIONID="$(uci -q get pia_wg.@region[0].id)" &&
+    PIAREGIONID="$(uci -q get "pia.$PIAWG_IF.region_id")" &&
       jq -r --arg r "$PIAREGIONID" '.regions[] | select(.id == $r) | .servers.wg[]? | "  wg   \(.ip) \(.cn)"' "$CD/servers.json"
   else
     echo "Servers list: none"
@@ -472,7 +510,7 @@ cache_show() {
 }
 
 set_cache() {
-  CACHEDIR="$(uci -q get pia_wg.@cache[0].dir)" || CACHEDIR="$CACHEDEFDIR"
+  CACHEDIR="$(uci -q get pia.cache.dir)" || CACHEDIR="$CACHEDEFDIR"
   printf "Directory for the offline cache (press enter for %s): " "$CACHEDIR"
   read -r NEWCACHEDIR
   [ -z "$NEWCACHEDIR" ] || CACHEDIR="$NEWCACHEDIR"
@@ -480,12 +518,12 @@ set_cache() {
   read -r CACHEREGIONS
   read_yn "Allow meta servers whose certificate is not signed by the PIA CA (insecure)" n && CACHEINSECURE=1 || CACHEINSECURE=0
   {
-    echo "delete pia_wg.@cache[0]"
-    echo "add pia_wg cache"
-    echo "set pia_wg.@cache[0].dir=\"$CACHEDIR\""
-    echo "set pia_wg.@cache[0].insecure_meta=\"$CACHEINSECURE\""
-    for R in $CACHEREGIONS; do echo "add_list pia_wg.@cache[0].regions=\"$R\""; done
-    echo "commit pia_wg"
+    echo "delete pia.cache"
+    echo "set pia.cache=cache"
+    echo "set pia.cache.dir=\"$CACHEDIR\""
+    echo "set pia.cache.insecure_meta=\"$CACHEINSECURE\""
+    for R in $CACHEREGIONS; do echo "add_list pia.cache.regions=\"$R\""; done
+    echo "commit pia"
   } | uci -q batch >/dev/null
 }
 
@@ -514,11 +552,11 @@ legacy_probe() {
   # PIA servers do not accept addKey from inside a PIA tunnel
   pia_wan
   # The servers the tunnel is connected to
-  LIVEIPS=" $(wg show "$PIAWG_IF" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}' | tr '\n' ' ') $(uci -q get "network.$PIAWG_PEER.endpoint_host") "
+  LIVEIPS=" $(live_endpoints) "
   echo "Checking the regions (leaving via ${WANDEV:-the default route}); this takes a few minutes" >&3
   CA="$(pia_ca)"
-  LU="$(uci -q get pia_wg.@vpntoken[0].user)"
-  LP="$(uci -q get pia_wg.@vpntoken[0].pass)"
+  LU="$(uci -q get pia.vpntoken.user)"
+  LP="$(uci -q get pia.vpntoken.pass)"
   PROBETMP="$CD/legacy.list.tmp"
   echo "# $(date +%s)" >"$PROBETMP"
   # Run in the background and wait for it, so that a signal is handled at once
@@ -672,12 +710,11 @@ select_region() {
   PIAREGIONDNS="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .dns")"
   echo "Region selected: $PIAREGIONNAME"
   uci -q batch <<EOI >/dev/null
-    delete pia_wg.@region[0]
-    add pia_wg region
-    set pia_wg.@region[0].id="$PIAREGIONID"
-    set pia_wg.@region[0].name="$PIAREGIONNAME"
-    set pia_wg.@region[0].dns="$PIAREGIONDNS"
-    commit pia_wg.@region[0]
+    set pia.$PIAWG_IF=interface
+    set pia.$PIAWG_IF.region_id="$PIAREGIONID"
+    set pia.$PIAWG_IF.region_name="$PIAREGIONNAME"
+    set pia.$PIAWG_IF.region_dns="$PIAREGIONDNS"
+    commit pia
 EOI
   echo "Checking PIA meta servers…"
   if meta_refresh; then
@@ -696,11 +733,10 @@ set_piauser() {
   stty echo
   printf "\n"
   uci -q batch <<EOI >/dev/null
-    delete pia_wg.@user[0]
-    add pia_wg user
-    set pia_wg.@user[0].id="$PIAUSER"
-    set pia_wg.@user[0].password="$PIAPASS"
-    commit pia_wg.@user[0]
+    set pia.account=account
+    set pia.account.id="$PIAUSER"
+    set pia.account.password="$PIAPASS"
+    commit pia
 EOI
 }
 
@@ -715,7 +751,7 @@ piaresp_init() {
 # pia_api <meta path> <subdomain> <domain path> [curl args…]
 # Call the PIA API the way the official apps do: through cached meta servers
 # by IP (certificate verified against the PIA CA), then unverified meta servers
-# if pia_wg.@cache[0].insecure_meta is set, then privateinternetaccess.com and
+# if pia.cache.insecure_meta is set, then privateinternetaccess.com and
 # piaproxy.net. The response body is left in $PIARESP.
 # Returns 0 on HTTP 2xx, 1 on HTTP 401 (bad credentials/token), 2 otherwise.
 pia_api() {
@@ -728,7 +764,7 @@ pia_api() {
   CA="$(pia_ca)"
   CD="$(cache_dir)"
   EPS="$(awk '{print $1, $2, "pin"}' "$CD/meta.list" 2>/dev/null)"
-  [ "$(uci -q get pia_wg.@cache[0].insecure_meta)" = '1' ] &&
+  [ "$(uci -q get pia.cache.insecure_meta)" = '1' ] &&
     EPS="$EPS
 $(meta_candidates | head -n "$META_PROBES" | awk '{print $1, $2, "insecure"}')"
   EPS="$EPS
@@ -758,13 +794,13 @@ iso2epoch() {
   jq -nr --arg d "$1" 'try (($d[0:19] + "Z") | fromdateiso8601) catch 0' 2>/dev/null || echo 0
 }
 
-# token_ok <section> [renew]: is the stored token in pia_wg.@<section>[0]
+# token_ok <section> [renew]: is the stored token in pia.<section>
 # still usable (default) or still fresh (renew: before half of its life, at
 # most 21 days before expiry, as the official apps do)
 token_ok() {
-  uci -q get "pia_wg.@$1[0]" >/dev/null || return 1
-  EXP="$(uci -q get "pia_wg.@$1[0].expires")"
-  TS="$(uci -q get "pia_wg.@$1[0].timestamp")"
+  uci -q get "pia.$1" >/dev/null || return 1
+  EXP="$(uci -q get "pia.$1.expires")"
+  TS="$(uci -q get "pia.$1.timestamp")"
   EXP="${EXP:-0}"
   TS="${TS:-0}"
   NOW="$(date +%s)"
@@ -785,24 +821,24 @@ store_apitoken() {
   APITOK="$(jq -r '.api_token // empty' "$PIARESP" 2>/dev/null)"
   [ "$APITOK" ] || return 1
   uci -q batch <<EOI >/dev/null
-    delete pia_wg.@apitoken[0]
-    add pia_wg apitoken
-    set pia_wg.@apitoken[0].token="$APITOK"
-    set pia_wg.@apitoken[0].expires="$(iso2epoch "$(jq -r '.expires_at // empty' "$PIARESP")")"
-    set pia_wg.@apitoken[0].timestamp="$(date +%s)"
-    commit pia_wg
+    delete pia.apitoken
+    set pia.apitoken=token
+    set pia.apitoken.token="$APITOK"
+    set pia.apitoken.expires="$(iso2epoch "$(jq -r '.expires_at // empty' "$PIARESP")")"
+    set pia.apitoken.timestamp="$(date +%s)"
+    commit pia
 EOI
 }
 
 # PIA API v5 login (username/password -> long lived API token)
 api_login() {
   echo "Logging in to PIA" >&3
-  uci -q get pia_wg.@user[0] >/dev/null || {
+  uci -q get pia.account >/dev/null || {
     [ "$AUTO" ] && return 1 || set_piauser
   }
   pia_api /api/client/v5/api_token apiv5 /api/client/v5/api_token \
-    --data-urlencode "username=$(uci -q get pia_wg.@user[0].id)" \
-    --data-urlencode "password=$(uci -q get pia_wg.@user[0].password)"
+    --data-urlencode "username=$(uci -q get pia.account.id)" \
+    --data-urlencode "password=$(uci -q get pia.account.password)"
   case $? in
   0) store_apitoken && return 0 ;;
   1) echo "PIA login refused; check your PIA username and password" >&3 ;;
@@ -815,7 +851,7 @@ api_login() {
 api_token_refresh() {
   echo "Renewing PIA API token" >&3
   pia_api /api/client/v5/refresh apiv5 /api/client/v5/refresh -d "" \
-    --header "Authorization: Token $(uci -q get pia_wg.@apitoken[0].token)" &&
+    --header "Authorization: Token $(uci -q get pia.apitoken.token)" &&
     store_apitoken
 }
 
@@ -823,18 +859,18 @@ api_token_refresh() {
 vpn_token_get() {
   echo "Renewing PIA VPN token" >&3
   pia_api /api/client/v5/vpn_token apiv5 /api/client/v5/vpn_token -d "" \
-    --header "Authorization: Token $(uci -q get pia_wg.@apitoken[0].token)" || return
+    --header "Authorization: Token $(uci -q get pia.apitoken.token)" || return
   VPNS1="$(jq -r '.vpn_secret1 // empty' "$PIARESP" 2>/dev/null)"
   VPNS2="$(jq -r '.vpn_secret2 // empty' "$PIARESP" 2>/dev/null)"
   [ "$VPNS1" ] && [ "$VPNS2" ] || return 2
   uci -q batch <<EOI >/dev/null
-    delete pia_wg.@vpntoken[0]
-    add pia_wg vpntoken
-    set pia_wg.@vpntoken[0].user="vpn_token_$VPNS1"
-    set pia_wg.@vpntoken[0].pass="$VPNS2"
-    set pia_wg.@vpntoken[0].expires="$(iso2epoch "$(jq -r '.expires_at // empty' "$PIARESP")")"
-    set pia_wg.@vpntoken[0].timestamp="$(date +%s)"
-    commit pia_wg
+    delete pia.vpntoken
+    set pia.vpntoken=token
+    set pia.vpntoken.user="vpn_token_$VPNS1"
+    set pia.vpntoken.pass="$VPNS2"
+    set pia.vpntoken.expires="$(iso2epoch "$(jq -r '.expires_at // empty' "$PIARESP")")"
+    set pia.vpntoken.timestamp="$(date +%s)"
+    commit pia
 EOI
 }
 
@@ -857,8 +893,8 @@ pia_tokens() {
 }
 
 pia_token_forget() {
-  uci -q delete pia_wg.@vpntoken[0]
-  uci -q commit pia_wg
+  uci -q delete pia.vpntoken
+  uci -q commit pia
 }
 
 # Register our WireGuard key on a server of the configured region, as the
@@ -871,13 +907,16 @@ pia_addkey() {
   CA="$(pia_ca)"
   PUB="$WGPUB"
   if [ "$PIAAUTH" = 'vpn' ]; then
-    set -- --user "$(uci -q get pia_wg.@vpntoken[0].user):$(uci -q get pia_wg.@vpntoken[0].pass)"
+    set -- --user "$(uci -q get pia.vpntoken.user):$(uci -q get pia.vpntoken.pass)"
   else
     set -- --data-urlencode "pt=$(legacy_token_hash)"
   fi
-  SERVERS="$(jq -r --arg r "$(uci -q get pia_wg.@region[0].id)" \
+  SERVERS="$(jq -r --arg r "$(uci -q get "pia.$PIAWG_IF.region_id")" \
     '.regions[] | select(.id == $r) | .servers.wg[]? | "\(.ip) \(.cn) ip"' "$(cache_dir)/servers.json" 2>/dev/null)
-$(uci -q get pia_wg.@region[0].dns) - dns"
+$(uci -q get "pia.$PIAWG_IF.region_dns") - dns"
+  # one peer per token and server: keep off the servers of the other interfaces
+  SIBIPS="$(sibling_endpoints)"
+  SERVERS="$(echo "$SERVERS" | awk -v u="$SIBIPS" 'BEGIN{n=split(u,a," ");for(i=1;i<=n;i++)x[a[i]]=1} !($1 in x)')"
   unset ADDKEYAUTHFAIL
   while read -r HOST CN MODE; do
     case "$MODE" in
@@ -896,7 +935,7 @@ EOS
 
 # Is the configured region marked in the legacy list ('cache probe')?
 region_needs_legacy() {
-  LRID="$(uci -q get pia_wg.@region[0].id)" || return 1
+  LRID="$(uci -q get "pia.$PIAWG_IF.region_id")" || return 1
   [ -n "$LRID" ] || return 1
   case " $(legacy_ids) " in
   *" $LRID "*) return 0 ;;
@@ -918,7 +957,7 @@ pia_addkey_any() {
   if [ "$PIAAUTH" = 'vpn' ]; then
     pia_addkey && return 0
     [ "$ADDKEYAUTHFAIL" ] || return 1
-    VTS="$(uci -q get pia_wg.@vpntoken[0].timestamp)"
+    VTS="$(uci -q get pia.vpntoken.timestamp)"
     if [ $(($(date +%s) - ${VTS:-0})) -gt 600 ]; then
       echo "PIA server refused the VPN token; renewing it" >&3
       pia_token_forget
@@ -935,13 +974,13 @@ pia_addkey_any() {
 }
 
 validate_dip() {
-  DIPTOK="$(uci -q get pia_wg.@dip[0].token)" || return
+  DIPTOK="$(uci -q get "pia.$PIAWG_IF.dip_token")" || return
   token_ok apitoken || pia_tokens >/dev/null 2>&1
   # Try to fetch DIP info from API
-  if uci -q get pia_wg.@apitoken[0].token >/dev/null; then
+  if uci -q get pia.apitoken.token >/dev/null; then
     pia_api /api/client/v5/dedicated_ip apiv5 /api/client/v5/dedicated_ip -X POST \
       --header 'Content-Type: application/json' \
-      --header "Authorization: Token $(uci -q get pia_wg.@apitoken[0].token)" \
+      --header "Authorization: Token $(uci -q get pia.apitoken.token)" \
       -d '{ "tokens":["'"$DIPTOK"'"] }'
   else
     legacy_token_ensure
@@ -955,7 +994,7 @@ validate_dip() {
   DIP_STATUS_NEW="$(echo "$DIPR" | jq -r 'select(.status) | .status')"
   if [ -z "$DIP_STATUS_NEW" ]; then
     # API call failed - preserve existing config if it exists
-    DIP_STATUS_EXISTING="$(uci -q get pia_wg.@dip[0].status)"
+    DIP_STATUS_EXISTING="$(uci -q get "pia.$PIAWG_IF.dip_status")"
     if [ -n "$DIP_STATUS_EXISTING" ]; then
       echo "Cannot validate DIP (network down?), keeping existing config" >&3
       return 0
@@ -973,11 +1012,18 @@ validate_dip() {
     "cn|$(echo "$DIPR" | jq -r 'select(.cn) | .cn')" \
     "expire|$(echo "$DIPR" | jq -r 'select(.dip_expire) | .dip_expire')" \
     "id|$(echo "$DIPR" | jq -r 'select(.ip) | .id')"; do
-    [ "$(uci -q get "pia_wg.@dip[0].${DKV%%|*}")" = "${DKV#*|}" ] && continue
-    uci -q set "pia_wg.@dip[0].${DKV%%|*}=${DKV#*|}"
+    [ "$(uci -q get "pia.$PIAWG_IF.dip_${DKV%%|*}")" = "${DKV#*|}" ] && continue
+    uci -q set "pia.$PIAWG_IF.dip_${DKV%%|*}=${DKV#*|}"
     DIPCH=1
   done
-  [ -z "$DIPCH" ] || uci -q commit pia_wg
+  [ -z "$DIPCH" ] || uci -q commit pia
+}
+
+# Remove the options of one group (iface_, peer_, dip_, region_) of the interface
+clear_group() {
+  for CG in $(uci -q show "pia.$PIAWG_IF" | sed -n "s/^pia\.$PIAWG_IF\.\($1[A-Za-z0-9_]*\)=.*/\1/p"); do
+    uci -q delete "pia.$PIAWG_IF.$CG"
+  done
 }
 
 set_dip() {
@@ -986,71 +1032,107 @@ set_dip() {
     read -r DIPTOK
   }; do
     [ -z "$DIPTOK" ] && {
-      uci -q delete pia_wg.@dip[0]
-      uci -q commit pia_wg
+      clear_group dip_
+      uci -q commit pia
       return
     }
     [ ${#DIPTOK} -eq 32 ] && [ "$(printf '%.3s' "$DIPTOK")" = "DIP" ] && break
     echo "Token starts with DIP and is 32 characters long!"
   done
-  uci -q batch <<EOI >/dev/null
-    delete pia_wg.@dip[0]
-    add pia_wg dip
-    set pia_wg.@dip[0].token="$DIPTOK"
-    commit pia_wg.@dip[0]
-EOI
+  clear_group dip_
+  uci -q set "pia.$PIAWG_IF=interface"
+  uci -q set "pia.$PIAWG_IF.dip_token=$DIPTOK"
+  uci -q commit pia
 }
 
+# Create an interface section ($1: the name; asked if missing)
 set_iface() {
-  printf "Name of the WireGuard network interface (press enter to keep %s): " "$PIAWG_IF"
-  read -r NEWIF
-  [ -z "$NEWIF" ] && NEWIF="$PIAWG_IF"
-  case "$NEWIF" in
-  '' | *[!A-Za-z0-9_]*)
-    echo "Invalid name: use letters, digits and underscore only!" >&3
-    return 1
-    ;;
-  esac
-  [ ${#NEWIF} -le 15 ] || {
-    echo "Invalid name: 15 characters at most!" >&3
+  NEWIF="$1"
+  if [ -z "$NEWIF" ]; then
+    printf "Name of the WireGuard network interface (press enter for %s): " "$PIAWG_IF"
+    read -r NEWIF
+    [ -z "$NEWIF" ] && NEWIF="$PIAWG_IF"
+  fi
+  valid_ifname "$NEWIF" || {
+    echo "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES" >&3
     return 1
   }
-  if [ "$NEWIF" != "$PIAWG_IF" ] && uci -q get "network.$PIAWG_IF" >/dev/null; then
-    # Remove the interface created under the previous name
-    ifdown "$PIAWG_IF" >/dev/null 2>&1
-    uci -q delete "network.$PIAWG_IF"
-    uci -q delete "network.$PIAWG_PEER"
-    uci -q commit network
-  fi
-  uci -q batch <<EOI >/dev/null
-    delete pia_wg.@iface[0]
-    add pia_wg iface
-    set pia_wg.@iface[0].name="$NEWIF"
-    commit pia_wg.@iface[0]
-EOI
   PIAWG_IF="$NEWIF"
+  set_ifvars
+  if ! iface_exists "$PIAWG_IF"; then
+    uci -q set "pia.$PIAWG_IF=interface"
+    uci -q commit pia
+  fi
+  return 0
+}
+
+# Rename the interface being handled ($1: the new name); its network sections
+# are removed (they are made again at the next start or renew)
+rename_iface() {
+  valid_ifname "$1" || {
+    echo "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES" >&2
+    return 1
+  }
+  iface_exists "$PIAWG_IF" || {
+    echo "No interface named '$PIAWG_IF' is configured!" >&2
+    return 1
+  }
+  iface_exists "$1" && {
+    echo "An interface named '$1' is already configured!" >&2
+    return 1
+  }
+  ifdown "$PIAWG_IF" >/dev/null 2>&1
+  uci -q delete "network.$PIAWG_IF"
+  uci -q delete "network.$PIAWG_PEER"
+  uci -q commit network
+  uci -q rename "pia.$PIAWG_IF=$1"
+  uci -q commit pia
+  watchdog_remove
+  rm -f "$SESSION"
+  echo "Interface $PIAWG_IF is now $1 (start it again, and mind its firewall zone)"
+  PIAWG_IF="$1"
+  set_ifvars
+}
+
+# Forget an interface: its section, network sections, cron entry and session
+remove_iface() {
+  iface_exists "$1" || {
+    echo "No interface named '$1' is configured!" >&2
+    return 1
+  }
+  PIAWG_IF="$1"
+  set_ifvars
+  watchdog_remove
+  ifdown "$PIAWG_IF" >/dev/null 2>&1
+  uci -q delete "network.$PIAWG_IF"
+  uci -q delete "network.$PIAWG_PEER"
+  uci -q commit network
+  uci -q delete "pia.$PIAWG_IF"
+  uci -q commit pia
+  rm -f "$SESSION"
+  echo "Interface $PIAWG_IF removed"
 }
 
 set_defnetpeer() {
+  clear_group peer_
   uci -q batch <<EOI >/dev/null
-    delete pia_wg.@net_peer[0]
-    add pia_wg net_peer
-    set pia_wg.@net_peer[0].route_allowed_ips='1'
-    set pia_wg.@net_peer[0].persistent_keepalive="25"
-    add_list pia_wg.@net_peer[0].allowed_ips="::/0"
-    add_list pia_wg.@net_peer[0].allowed_ips="0.0.0.0/0"
-    commit pia_wg.@net_peer[0]
+    set pia.$PIAWG_IF=interface
+    set pia.$PIAWG_IF.peer_route_allowed_ips='1'
+    set pia.$PIAWG_IF.peer_persistent_keepalive="25"
+    add_list pia.$PIAWG_IF.peer_allowed_ips="::/0"
+    add_list pia.$PIAWG_IF.peer_allowed_ips="0.0.0.0/0"
+    commit pia
 EOI
 }
 
 set_defnetiface() {
+  clear_group iface_
   uci -q batch <<EOI >/dev/null
-    delete pia_wg.@net_interface[0]
-    add pia_wg net_interface
-    set pia_wg.@net_interface[0].proto="wireguard"
-    set pia_wg.@net_interface[0].defaultroute='1'
-    set pia_wg.@net_interface[0].delegate='0' # No IPv6 with PIA
-    commit pia_wg.@net_interface[0]
+    set pia.$PIAWG_IF=interface
+    set pia.$PIAWG_IF.iface_proto="wireguard"
+    set pia.$PIAWG_IF.iface_defaultroute='1'
+    set pia.$PIAWG_IF.iface_delegate='0' # No IPv6 with PIA
+    commit pia
 EOI
 }
 
@@ -1064,10 +1146,10 @@ EOI
 session_get() { awk -F= -v k="$1" '$1==k{print substr($0,length(k)+2); exit}' "$SESSION" 2>/dev/null; }
 
 session_scope() {
-  if uci -q get pia_wg.@dip[0].ip >/dev/null; then
-    echo "dip:$(uci -q get pia_wg.@dip[0].ip)"
+  if uci -q get "pia.$PIAWG_IF.dip_ip" >/dev/null; then
+    echo "dip:$(uci -q get "pia.$PIAWG_IF.dip_ip")"
   else
-    echo "region:$(uci -q get pia_wg.@region[0].id)"
+    echo "region:$(uci -q get "pia.$PIAWG_IF.region_id")"
   fi
 }
 
@@ -1096,19 +1178,99 @@ session_save() {
   )
 }
 
-# Remove the sections created under an older version: the keys and the legacy
-# token used to be stored in /etc/config/pia_wg
-migrate_conf() {
-  MIG=''
-  for MS in keys token; do
-    uci -q get "pia_wg.@${MS}[0]" >/dev/null || continue
-    uci -q delete "pia_wg.@${MS}[0]"
-    MIG=1
-  done
-  [ -z "$MIG" ] || {
-    uci -q commit pia_wg
-    echo "Removed the keys and token saved by older versions from $PIACONF"
-  }
+# Older versions: the config was /etc/config/pia_wg (anonymous sections), the
+# cron tags and files were named pia_wg, and the keys and the legacy token were
+# stored there. Convert once: config file, cache dir, cron entries, hook.
+migrate_names() {
+  OLDCONF='/etc/config/pia_wg'
+  if [ -s "$OLDCONF" ] && [ ! -s "$PIACONF" ]; then
+    migrate_config conf || return 1
+  fi
+  # cache dir on external storage
+  if [ "$(uci -q get pia.cache.dir)" = '/mnt/usb/pia_wg' ]; then
+    if [ -d /mnt/usb/pia_wg ] && [ ! -e /mnt/usb/pia ]; then
+      mv /mnt/usb/pia_wg /mnt/usb/pia
+    fi
+    if [ -d /mnt/usb/pia ]; then
+      uci -q set pia.cache.dir='/mnt/usb/pia'
+      uci -q commit pia
+    fi
+  fi
+  # cron tags and paths
+  if grep -qF '# pia_wg ' /etc/crontabs/root 2>/dev/null; then
+    MIGIF="$(iface_list | head -n 1)"
+    crontab -l | sed \
+      -e 's/# pia_wg cache/# pia cache/' \
+      -e 's/# pia_wg renew/# pia renew/' \
+      -e "s/# pia_wg watchdog/# pia watchdog [${MIGIF:-wg_pia}]/" \
+      -e 's/# pia_wg expiry test/# pia expiry test/' \
+      -e 's#/mnt/usb/pia_wg/#/mnt/usb/pia/#g' | crontab -
+  fi
+  if [ -e /etc/hotplug.d/iface/80-pia_wg ]; then
+    rm -f /etc/hotplug.d/iface/80-pia_wg
+    renew_installed && hook_install
+  fi
+  return 0
+}
+
+# /etc/config/pia_wg -> /etc/config/pia (one section per interface)
+migrate_config() {
+  MIGIF="$(uci -q get pia_wg.@iface[0].name)"
+  valid_ifname "$MIGIF" || MIGIF='wg_pia'
+  : >"$PIACONF"
+  {
+    MV="$(uci -q get pia_wg.@user[0].id)" && [ -n "$MV" ] && {
+      echo "set pia.account=account"
+      echo "set pia.account.id='$MV'"
+      MV="$(uci -q get pia_wg.@user[0].password)" && echo "set pia.account.password='$MV'"
+    }
+    for MT in apitoken vpntoken; do
+      uci -q get "pia_wg.@${MT}[0]" >/dev/null || continue
+      echo "set pia.$MT=token"
+      for MO in token user pass expires timestamp; do
+        MV="$(uci -q get "pia_wg.@${MT}[0].$MO")" && echo "set pia.$MT.$MO='$MV'"
+      done
+    done
+    uci -q get pia_wg.@cache[0] >/dev/null && {
+      echo "set pia.cache=cache"
+      for MO in dir insecure_meta; do
+        MV="$(uci -q get "pia_wg.@cache[0].$MO")" && echo "set pia.cache.$MO='$MV'"
+      done
+      for MV in $(uci -q get pia_wg.@cache[0].regions); do echo "add_list pia.cache.regions='$MV'"; done
+    }
+    MV="$(uci -q get pia_wg.@log[0].path)" && {
+      echo "set pia.log=log"
+      echo "set pia.log.path='$MV'"
+    }
+    echo "set pia.$MIGIF=interface"
+    for MO in id name dns; do
+      MV="$(uci -q get "pia_wg.@region[0].$MO")" && echo "set pia.$MIGIF.region_$MO='$MV'"
+    done
+    for MO in token ip cn status expire id; do
+      MV="$(uci -q get "pia_wg.@dip[0].$MO")" && echo "set pia.$MIGIF.dip_$MO='$MV'"
+    done
+    for MG in net_interface:iface net_peer:peer; do
+      uci -q show "pia_wg.@${MG%%:*}[0]" | sed -n 's/^pia_wg\.[^.]*\.\([A-Za-z0-9_]*\)=\(.*\)$/\1 \2/p' |
+        while read -r MK MR; do
+          eval "set -- $MR"
+          if [ $# -gt 1 ]; then
+            for MV in "$@"; do echo "add_list pia.$MIGIF.${MG#*:}_$MK='$MV'"; done
+          else
+            echo "set pia.$MIGIF.${MG#*:}_$MK='$1'"
+          fi
+        done
+    done
+    echo "commit pia"
+  } | uci -q batch >/dev/null
+  # keep the old file unless the new one has what matters
+  if [ "$(uci -q get pia.account.id)" = "$(uci -q get pia_wg.@user[0].id)" ] && iface_exists "$MIGIF"; then
+    rm -f "$OLDCONF"
+    echo "Configuration moved from $OLDCONF to $PIACONF (interface $MIGIF)"
+  else
+    echo "Could not convert $OLDCONF; it was left in place" >&2
+    : >"$PIACONF"
+    return 1
+  fi
 }
 
 # Set a staged (RAM) option only if its effective value differs
@@ -1127,20 +1289,18 @@ persist_batch() {
   echo "add_list network.$PIAWG_IF.dns=${WGDNS1:-10.0.0.243}"
   echo "add_list network.$PIAWG_IF.dns=${WGDNS2:-10.0.0.242}"
   echo "set network.$PIAWG_PEER=wireguard_${PIAWG_IF}"
-  echo "set network.$PIAWG_PEER.description='PIA $(uci -q get pia_wg.@region[0].name | tr -d "'")'"
-  uci export pia_wg | awk '
-    $0==""{d=0;next}
-    index($0,"config net_"){
-      if($2=="net_interface"){d="network.'"$PIAWG_IF"'"}
-      else if($2=="net_peer"){d="network.'"$PIAWG_PEER"'"}
-      else d=0
-    }
-    d{
-      if($1=="option"){c="set"}
-      else if($1=="list"){c="add_list"}
+  echo "set network.$PIAWG_PEER.description='PIA $(uci -q get "pia.$PIAWG_IF.region_name" | tr -d "'")'"
+  # the interface's iface_* options go to the network interface, peer_* to the peer
+  uci export pia | awk -v qn="'$PIAWG_IF'" -v ni="network.$PIAWG_IF" -v np="network.$PIAWG_PEER" '
+    $1=="config"{d=($2=="interface" && $3==qn); next}
+    d && ($1=="option" || $1=="list"){
+      k=$2
+      if (k ~ /^iface_/) { sub(/^iface_/, "", k); t=ni }
+      else if (k ~ /^peer_/) { sub(/^peer_/, "", k); t=np }
       else next
-      printf("%s %s.%s=%s\n",c,d,$2,$3)
+      printf("%s %s.%s=%s\n", ($1=="option" ? "set" : "add_list"), t, k, $3)
     }'
+
 }
 
 # Create or update the persistent interface and peer, writing the flash only
@@ -1192,11 +1352,11 @@ net_reload() {
 # Legacy PIA API v2 token (24h), used if the v5 API fails
 renew_piatoken() {
   echo "Renewing PIA legacy token" >&3
-  uci -q get pia_wg.@user[0] >/dev/null || set_piauser
+  uci -q get pia.account >/dev/null || set_piauser
 
   pia_api /apiv2/token apiv2 /api/client/v2/token \
-    --data-urlencode "username=$(uci -q get pia_wg.@user[0].id)" \
-    --data-urlencode "password=$(uci -q get pia_wg.@user[0].password)"
+    --data-urlencode "username=$(uci -q get pia.account.id)" \
+    --data-urlencode "password=$(uci -q get pia.account.password)"
   if [ $? -eq 2 ]; then
     echo "Error: Failed to connect to PIA authentication server!" >&3
     exit 1
@@ -1229,18 +1389,21 @@ renew_piatoken() {
   (umask 077 && echo "$PIATOKEN $(date +%s)" >"$RUNDIR/legacy.$$.tmp" && mv "$RUNDIR/legacy.$$.tmp" "$LEGACYTOK")
 }
 
+# Show what is configured for one group of settings and ask whether to keep it
 keep_conf_section() {
+  KS="$PIAWG_IF"
   case "$1" in
-  user) DESC='PIA user' ;;
-  net_interface) DESC='WireGuard network interface options' ;;
-  net_peer) DESC='WireGuard network PIA peer options' ;;
-  region) DESC='PIA region' ;;
-  dip) DESC="Dedicated IP token" ;;
-  cache) DESC="Offline cache" ;;
+  user) DESC='PIA user' KS='account' KP='' ;;
+  net_interface) DESC='WireGuard network interface options' KP='iface_' ;;
+  net_peer) DESC='WireGuard network PIA peer options' KP='peer_' ;;
+  region) DESC='PIA region' KP='region_' ;;
+  dip) DESC="Dedicated IP token" KP='dip_' ;;
+  cache) DESC="Offline cache" KS='cache' KP='' ;;
   esac
-  if uci -q get "pia_wg.@$1[0]" >/dev/null; then
+  KOPTS="$(uci -q show "pia.$KS" | sed -n "s/^pia\.$KS\.\(${KP}[A-Za-z0-9_]*=.*\)/\1/p" | sed 's/^password=.*/password=<hidden>/')"
+  if [ -n "$KOPTS" ]; then
     echo "A configuration already exists for '$DESC':"
-    uci show "pia_wg.@$1[0]" | awk 'sub(/^[^.]*\.[^.]*\./,"")==1{print "  "$0}'
+    echo "$KOPTS" | sed 's/^/  /'
     read_yn "Keep this configuration" y
     return $?
   fi
@@ -1248,31 +1411,36 @@ keep_conf_section() {
 }
 
 check_conf() {
-  uci -q get pia_wg.@user[0] >/dev/null &&
+  uci -q get pia.account >/dev/null &&
     echo "User is configured" ||
     {
       echo "User is not configured!" >&3
       sleep 1
       [ "$AUTO" ] && return 1 || set_piauser
     }
-  uci -q get pia_wg.@net_interface[0] >/dev/null &&
+  iface_exists "$PIAWG_IF" || {
+    echo "Interface $PIAWG_IF is not configured!" >&3
+    [ "$AUTO" ] && return 1
+    set_iface "$PIAWG_IF" || return 1
+  }
+  uci -q get "pia.$PIAWG_IF.iface_proto" >/dev/null &&
     echo "Network interface options are configured" ||
     {
       echo "Network interface options are not configured!" >&3
       sleep 1
       [ "$AUTO" ] && return 1 || set_defnetiface
     }
-  uci -q get pia_wg.@net_peer[0] >/dev/null &&
+  uci -q get "pia.$PIAWG_IF.peer_allowed_ips" >/dev/null &&
     echo "Network peer options are configured" ||
     {
       echo "Network peer options are not configured!" >&3
       sleep 1
       [ "$AUTO" ] && return 1 || set_defnetpeer
     }
-  if uci -q get pia_wg.@dip[0] >/dev/null; then
+  if uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null; then
     echo "Dedicated IP is configured"
     validate_dip
-    DIP_STATUS="$(uci -q get pia_wg.@dip[0].status)"
+    DIP_STATUS="$(uci -q get "pia.$PIAWG_IF.dip_status")"
     [ "$DIP_STATUS" = 'active' ] &&
       echo "Dedicated IP is active" ||
       {
@@ -1281,7 +1449,7 @@ check_conf() {
         return 1
       }
   fi
-  uci -q get pia_wg.@region[0] >/dev/null &&
+  uci -q get "pia.$PIAWG_IF.region_id" >/dev/null &&
     echo "PIA region is configured" ||
     {
       echo "PIA region is not configured!" >&3
@@ -1298,7 +1466,6 @@ set_netconf() {
     echo "Configuration is incomplete; exiting!" >&3
     exit 1
   }
-  migrate_conf
   # if no DIP (DIP_STATUS is set from check_conf)
   if [ -z "$DIP_STATUS" ]; then
     if region_needs_legacy; then
@@ -1326,7 +1493,7 @@ set_netconf() {
     pia_addkey_any
   else
     pia_wan
-    PIAADDKEY="$(curl -s -k -G ${WANDEV:+--interface "if!$WANDEV"} --connect-to "$(uci -q get pia_wg.@dip[0].cn)::$(uci -q get pia_wg.@dip[0].ip)" --user "dedicated_ip_$(uci -q get pia_wg.@dip[0].token):$(uci -q get pia_wg.@dip[0].ip)" --data-urlencode "pubkey=$WGPUB" "https://$(uci -q get pia_wg.@dip[0].cn):1337/addKey")"
+    PIAADDKEY="$(curl -s -k -G ${WANDEV:+--interface "if!$WANDEV"} --connect-to "$(uci -q get "pia.$PIAWG_IF.dip_cn")::$(uci -q get "pia.$PIAWG_IF.dip_ip")" --user "dedicated_ip_$(uci -q get "pia.$PIAWG_IF.dip_token"):$(uci -q get "pia.$PIAWG_IF.dip_ip")" --data-urlencode "pubkey=$WGPUB" "https://$(uci -q get "pia.$PIAWG_IF.dip_cn"):1337/addKey")"
   fi
 
   WGSERVSTATUS="$(echo "$PIAADDKEY" | jq -r '.status')"
@@ -1377,7 +1544,7 @@ endpoint_route() {
     ERD="$(ip route get "$1" 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
     [ "$ERD" = "$PIAWG_IF" ] || return 0
   fi
-  ERL="$(ip -4 route show default | awk -v t="$PIAWG_IF" '
+  ERL="$(ip -4 route show default | awk -v t="$PIAIFS" '
     {
       dev = ""; gw = ""; m = 0
       for (i = 1; i <= NF; i++) {
@@ -1385,7 +1552,7 @@ endpoint_route() {
         if ($i == "via") gw = $(i + 1)
         if ($i == "metric") m = $(i + 1)
       }
-      if (dev != "" && dev != t) print m, (gw == "" ? "-" : gw), dev
+      if (dev != "" && index(t, " " dev " ") == 0 && dev !~ /^(tun|tap|ppp|wg)/) print m, (gw == "" ? "-" : gw), dev
     }' | sort -n | head -n 1)"
   [ -n "$ERL" ] || return 1
   # shellcheck disable=SC2086  # three words: metric, gateway or -, device
@@ -1408,9 +1575,9 @@ start_wgpia() {
     return 1
   }
   NEWKEY=''
-  echo "Starting PIA ($(uci get network.$PIAWG_PEER.description))" >&3
+  echo "Starting PIA ($(uci get "network.$PIAWG_PEER.description"))" >&3
   # Before the tunnel exists, so that there is no moment without it
-  endpoint_route "$(uci -q get network.$PIAWG_PEER.endpoint_host)" pin
+  endpoint_route "$(uci -q get "network.$PIAWG_PEER.endpoint_host")" pin
   ifup "$PIAWG_IF"
   sleep 1
   # The handshake can take a few seconds; check quietly before reporting
@@ -1426,11 +1593,11 @@ start_wgpia() {
 }
 
 stop_wgpia() {
-  DESC=" ($(uci -q get network.$PIAWG_PEER.description))" || DESC=""
+  DESC=" ($(uci -q get "network.$PIAWG_PEER.description"))" || DESC=""
   echo "Stopping PIA$DESC" >&3
   ifdown "$PIAWG_IF" >/dev/null 2>&1
   # the host route pinned by endpoint_route
-  SEP="$(uci -q get network.$PIAWG_PEER.endpoint_host)" && [ -n "$SEP" ] && ip route del "$SEP/32" 2>/dev/null
+  SEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")" && [ -n "$SEP" ] && ip route del "$SEP/32" 2>/dev/null
   return 0
 }
 
@@ -1452,7 +1619,7 @@ check_wg() {
     return 1
   fi
 
-  echo "Region is: $(uci get network.$PIAWG_PEER.description)"
+  echo "Region is: $(uci get "network.$PIAWG_PEER.description")"
   # Probe PIA's own in-tunnel DNS address (handed out by addKey): the probe is
   # an ICMP packet that never leaves the tunnel and names no third party.
   # The first hop does not always answer TTL expiry, so also try a plain ping
@@ -1506,7 +1673,7 @@ handshake_age() {
 
 # Is there a default route that is not the tunnel (a WAN)?
 wan_present() {
-  ip -4 route show default | awk -v t="$PIAWG_IF" '{for(i=1;i<NF;i++) if($i=="dev" && $(i+1)!=t) f=1} END{exit !f}'
+  ip -4 route show default | awk -v t="$PIAIFS" '{for(i=1;i<NF;i++) if($i=="dev" && index(t, " " $(i+1) " ")==0 && $(i+1) !~ /^(tun|tap|ppp|wg)/) f=1} END{exit !f}'
 }
 
 # renew [--force] [--new-key] [--apply] [--if-missing]
@@ -1593,25 +1760,31 @@ renew_remove() {
   echo "[$(date)] Renew removed" >>"$PIALOG"
 }
 
-# Called by the hotplug hook: hook ifup|ifdown <interface>
+# Called by the hotplug hook: hook ifup|ifdown <interface that changed>
 # (the endpoint route is deliberately left in place when the interface goes
 # down, so that the next ifup finds it)
 hook_cmd() {
   case "$1" in
-  ifup)
-    if [ "$2" = "$PIAWG_IF" ]; then
-      HEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
-      [ -n "$HEP" ] && endpoint_route "$HEP" pin
-      # up with nothing registered: make the session, which restarts it
-      session_staged || /bin/sh "$SCRIPTPATH" renew --if-missing --apply
-    else
-      /bin/sh "$SCRIPTPATH" renew --if-missing
-      # a WAN that came back may have a new gateway
-      HEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
-      [ -n "$HEP" ] && endpoint_route "$HEP" pin
-    fi
-    ;;
+  ifup) ;;
+  *) return 0 ;;
   esac
+  if iface_exists "$2"; then
+    PIAWG_IF="$2"
+    set_ifvars
+    HEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
+    [ -n "$HEP" ] && endpoint_route "$HEP" pin
+    # up with nothing registered: make the session, which restarts it
+    session_staged || /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" renew --if-missing --apply
+  else
+    # another interface: a WAN that came back may need our session and a new gateway
+    for HX in $(iface_list); do
+      /bin/sh "$SCRIPTPATH" -i "$HX" renew --if-missing
+      PIAWG_IF="$HX"
+      set_ifvars
+      HEP="$(uci -q get "network.$PIAWG_PEER.endpoint_host")"
+      [ -n "$HEP" ] && endpoint_route "$HEP" pin
+    done
+  fi
   return 0
 }
 
@@ -1625,10 +1798,10 @@ watchdog_lastrun() {
 }
 
 watchdog_install() {
-  grep -qF "/bin/sh $SCRIPTPATH start --cron $CRON_TAG_WD" /etc/crontabs/root 2>/dev/null && return
+  grep -qF "/bin/sh $SCRIPTPATH -i $PIAWG_IF start --cron $CRON_TAG_WD" /etc/crontabs/root 2>/dev/null && return
   {
     crontab -l 2>/dev/null | grep -vF "$CRON_TAG_WD"
-    echo "* * * * * /bin/sh $SCRIPTPATH start --cron $CRON_TAG_WD"
+    echo "* * * * * /bin/sh $SCRIPTPATH -i $PIAWG_IF start --cron $CRON_TAG_WD"
   } | crontab -
   echo "[$(date)] Watchdog installed" >>"$PIALOG"
 }
@@ -1695,15 +1868,19 @@ install_jobs() {
 }
 
 print_usage() {
-  echo "Usage: $0 { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | renew [ --force | --new-key | --apply ] | renew { install | remove } | watchdog { install | remove } | cache { refresh | install | remove | show | probe } | log { show | clear | path } | update | version}"
+  echo "Usage: $0 [ -i <interface|all> ] { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | renew [ --force | --new-key | --apply ] | renew { install | remove } | watchdog { install | remove } | cache { refresh | install | remove | show | probe } | log { show | clear | path } | update | version}"
+  echo "  The interfaces are the sections of /etc/config/pia, named like the network interface."
+  echo "  With several, -i NAME selects one (-i all or nothing: every one, for start, restart, stop, status, renew)."
   echo "  Details:"
   echo "    - configure          : same as configure all"
-  echo "    - configure all      : configure all settings"
-  echo "    - configure user     : set PIA user ID and password"
+  echo "    - configure all      : configure all settings (of the interface, created if needed)"
+  echo "    - configure user     : set PIA user ID and password (shared by the interfaces)"
   echo "    - configure dip      : set PIA dedicated IP"
   echo "    - configure region   : set/choose PIA region"
   echo "    - configure keys     : (the keys are kept in RAM only; nothing to configure)"
-  echo "    - configure interface: set the network interface name (default wg_pia)"
+  echo "    - configure interface [name] : create an interface (a section of /etc/config/pia)"
+  echo "    - configure rename <name>    : rename the interface (-i old)"
+  echo "    - configure remove <name>    : forget an interface (config, network sections, cron)"
   echo "    - configure cache    : set offline cache directory and options"
   echo "    - configure network  : generate default network settings"
   echo "    - init-network       : setup PIA WireGuard network (no start)"
@@ -1714,20 +1891,20 @@ print_usage() {
   echo "    - start|restart --cache : same and install the cache refresh"
   echo "    - stop               : stop PIA WireGuard (and remove the watchdog)"
   echo "    - status             : show PIA WireGuard status"
-  echo "    - renew              : register the key again (never starts or stops the tunnel; skipped while it is up)"
+  echo "    - renew              : register the session key again (never starts or stops the tunnel; skipped while it is up)"
   echo "    - renew --force      : register even if the tunnel is up (the key is re-added on the server)"
   echo "    - renew --new-key    : register a new key (needs --apply if the interface is up: it is restarted)"
-  echo "    - renew install      : install the renew cron (every 6 hours) and the ifup hook; removes the watchdog"
+  echo "    - renew install      : install the renew cron (every 6 hours, all interfaces) and the ifup hook; removes the watchdogs"
   echo "    - renew remove       : remove the renew cron and the hook"
-  echo "    - watchdog install   : install the watchdog"
+  echo "    - watchdog install   : install the watchdog (legacy, always on; per interface)"
   echo "    - watchdog remove    : remove the watchdog"
   echo "    - cache refresh      : refresh the offline cache (servers list, meta servers, tokens)"
   echo "    - cache install      : install the cache refresh (cron, every 6 hours)"
   echo "    - cache remove       : remove the cache refresh"
   echo "    - cache show         : show the offline cache"
   echo "    - cache probe        : check which regions need the legacy token"
-  echo "    - log show           : display the watchdog log"
-  echo "    - log clear          : clear the watchdog log"
+  echo "    - log show           : display the log"
+  echo "    - log clear          : clear the log"
   echo "    - log path           : set a custom Directory Path for the log"
   echo "    - update             : update the script to latest version"
   echo "    - version            : print the version and exit"
@@ -1735,12 +1912,54 @@ print_usage() {
 
 # ---- Main ->
 
-[ -e "$PIACONF" ] || touch "$PIACONF"
-PIALOG="$(logfile)"
+# -i NAME selects the interface (-i all: every one); with a single interface
+# configured it is implicit
+SELIF=''
+if [ "$1" = '-i' ]; then
+  SELIF="$2"
+  [ -n "$SELIF" ] || {
+    echo "-i needs an interface name (or all)" >&2
+    exit 1
+  }
+  shift 2
+fi
+
 [ -t 0 ] && unset AUTO || AUTO=1
 rundir_init
 trap cleanup EXIT
 trap 'exit 1' 1 2 3 6 15
+
+# Names of older versions (config, cron tags, hook, cache dir), once
+if [ -s /etc/config/pia_wg ] || [ -e /etc/hotplug.d/iface/80-pia_wg ] || grep -qF '# pia_wg ' /etc/crontabs/root 2>/dev/null; then
+  MIGWAIT=0
+  while ! mkdir "$RUNDIR/migrate.lock" 2>/dev/null && [ $MIGWAIT -lt 30 ]; do
+    MIGWAIT=$((MIGWAIT + 1))
+    sleep 1
+  done
+  [ -e "$PIACONF" ] || touch "$PIACONF"
+  migrate_names
+  rmdir "$RUNDIR/migrate.lock" 2>/dev/null
+fi
+[ -e "$PIACONF" ] || touch "$PIACONF"
+
+# Which interface
+IFLIST="$(iface_list)"
+IFCOUNT="$(echo "$IFLIST" | grep -c .)"
+MULTI=''
+if [ -n "$SELIF" ] && [ "$SELIF" != 'all' ]; then
+  PIAWG_IF="$SELIF"
+  valid_ifname "$PIAWG_IF" || {
+    echo "Invalid interface name '$PIAWG_IF'!" >&2
+    exit 1
+  }
+elif [ "$IFCOUNT" -eq 1 ]; then
+  PIAWG_IF="$IFLIST"
+elif [ "$IFCOUNT" -gt 1 ]; then
+  MULTI=1
+  PIAWG_IF="$(echo "$IFLIST" | head -n 1)"
+fi
+set_ifvars
+PIALOG="$(logfile)"
 
 # Logging (only if not in interactive mode)
 if [ "$AUTO" ]; then
@@ -1760,6 +1979,35 @@ else
   exec 3>&2
 fi
 
+# Several interfaces and none named (or -i all): run the command for each
+if [ -n "$MULTI" ] || [ "$SELIF" = 'all' ]; then
+  case "$1" in
+  'start' | 'restart' | 'stop' | 'status' | 'renew' | 'init-network')
+    case "$1 $2" in
+    'renew install' | 'renew remove') ;;
+    *)
+      MR=0
+      for MX in $IFLIST; do
+        [ "$1" = 'status' ] && echo "== $MX =="
+        /bin/sh "$SCRIPTPATH" -i "$MX" "$@" || MR=1
+      done
+      exit $MR
+      ;;
+    esac
+    ;;
+  'configure' | 'watchdog')
+    case "$1 $2" in
+    'configure ' | 'configure all' | 'configure region' | 'configure dip' | 'configure network' | 'configure rename' | 'watchdog install' | 'watchdog remove')
+      if [ -z "$SELIF" ] || [ "$SELIF" = 'all' ]; then
+        echo "Several interfaces are configured ($(echo "$IFLIST" | tr '\n' ' ')): use -i NAME" >&2
+        exit 1
+      fi
+      ;;
+    esac
+    ;;
+  esac
+fi
+
 # Serialise the runs that act on the tunnel, the tokens or the cache
 case "$1" in
 'start' | 'restart' | 'stop' | 'init-network') lock_take "$1" ;;
@@ -1776,29 +2024,39 @@ case "$1" in
 'configure') case "$2" in
   '' | 'all')
     keep_conf_section 'user' || set_piauser
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
     keep_conf_section 'net_interface' || set_defnetiface
     keep_conf_section 'net_peer' || set_defnetpeer
     if read_yn "Do you have a dedicated IP" n; then
       keep_conf_section 'dip' || set_dip
       validate_dip
     else
-      uci -q delete pia_wg.@dip[0]
-      uci -q commit pia_wg
+      clear_group dip_
+      uci -q commit pia
     fi
     # if no DIP ask for region
-    uci -q get pia_wg.@dip[0].token >/dev/null || keep_conf_section 'region' || select_region
+    uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null || keep_conf_section 'region' || select_region
     keep_conf_section 'cache' || set_cache
     ;;
   'user') keep_conf_section 'user' || set_piauser ;;
-  'dip') keep_conf_section 'dip' || set_dip ;;
-  'region') keep_conf_section 'region' || select_region ;;
+  'dip')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
+    keep_conf_section 'dip' || set_dip
+    ;;
+  'region')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
+    keep_conf_section 'region' || select_region
+    ;;
   'network')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
     keep_conf_section 'net_interface' || set_defnetiface
     keep_conf_section 'net_peer' || set_defnetpeer
     ;;
   'keys') echo "The WireGuard keys are not saved: a new pair is generated in RAM at each start (as the official apps do) or with 'renew --new-key'" ;;
   'cache') keep_conf_section 'cache' || set_cache ;;
-  'interface') set_iface ;;
+  'interface') set_iface "$3" ;;
+  'rename') rename_iface "$3" ;;
+  'remove') remove_iface "${3:-$SELIF}" ;;
   *)
     echo "Unknown configure subcommand '$2'!"
     print_usage
