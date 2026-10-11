@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.43
+# Version: 1.0.44
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -40,9 +40,10 @@ PIA_DNS='10.0.0.242'
 PIA_DNS_SO='10.0.0.243'
 PIA_DNS_MACE='10.0.0.244'
 PIA_DNS_SO_MACE='10.0.0.241'
-PIA_MTU_SMALL=1280  # the Android app's 'small packets' WireGuard MTU
-PIA_MTU_OVERHEAD=80 # WAN MTU minus this = PIA's standard (the desktop app, 1420 on 1500)
-PIA_KEEPALIVE=25    # the official apps' PersistentKeepalive
+PIA_MTU_SMALL=1280   # the Android app's 'small packets' WireGuard MTU
+PIA_MTU_OPTIMAL=1440 # IPv4 only: 1500 minus the 60 bytes of IPv4 + WireGuard (a WAN of 1500, or PPPoE with 1508)
+PIA_MTU_OVERHEAD=80  # WAN MTU minus this = PIA's standard (the desktop app, 1420 on 1500)
+PIA_KEEPALIVE=25     # the official apps' PersistentKeepalive
 # AmneziaWG obfuscation used when the server sends none (as the official app)
 PIA_AWG_DEFAULTS='jc=5 jmin=25 jmax=100 s1=5 s2=3 h1=1234567891 h2=1234567892 h3=1234567893 h4=1234567894'
 UCISTAGEDIR='/tmp/.uci'               # where uci keeps the RAM-staged (uncommitted) changes
@@ -1752,10 +1753,12 @@ ask_mtu() {
   AMSTD="$(std_mtu)"
   AMCUR="$(uci -q get "pia.$PIAWG_IF.iface_mtu")"
   AMDEF=1
-  [ -n "$AMCUR" ] && [ "$AMCUR" -le "$PIA_MTU_SMALL" ] && AMDEF=2
+  [ -n "$AMCUR" ] && [ "$AMCUR" -eq "$PIA_MTU_OPTIMAL" ] && AMDEF=2
+  [ -n "$AMCUR" ] && [ "$AMCUR" -le "$PIA_MTU_SMALL" ] && AMDEF=3
   echo "Packet size (MTU):"
-  echo "  1) Standard ($AMSTD, PIA's)"
-  echo "  2) Small ($PIA_MTU_SMALL, for networks that drop or fragment large packets)"
+  echo "  1) Standard ($AMSTD): recommended for IPv4 + IPv6 traffic"
+  echo "  2) Optimal ($PIA_MTU_OPTIMAL): IPv4 only via WAN 1500 or PPPoE 1508"
+  echo "  3) Small ($PIA_MTU_SMALL): improve compatibility for mobile networks"
   [ -z "$AMCUR" ] || echo "  (now $AMCUR)"
   while :; do
     printf "Select the packet size (press enter for %s): " "$AMDEF"
@@ -1767,6 +1770,10 @@ ask_mtu() {
       break
       ;;
     2)
+      uci -q set "pia.$PIAWG_IF.iface_mtu=$PIA_MTU_OPTIMAL"
+      break
+      ;;
+    3)
       uci -q set "pia.$PIAWG_IF.iface_mtu=$PIA_MTU_SMALL"
       break
       ;;
@@ -1954,16 +1961,25 @@ unstage_legacy() {
 }
 
 # The persistent part of the interface and of the peer, as uci batch commands
+#
+# The options the script manages are replaced one by one: the others of the
+# section (set by hand in LuCI, such as ip4table or ip6assign) are left alone.
 persist_batch() {
-  echo "delete network.$PIAWG_IF"
-  echo "delete network.$PIAWG_PEER"
   echo "set network.$PIAWG_IF=interface"
+  echo "set network.$PIAWG_PEER=${PIAPROTO}_${PIAWG_IF}"
+  # (the session options are RAM only: any left in the file are old)
+  for PBK in private_key proto defaultroute delegate dns_metric dns mace mtu metric multipath addresses \
+    awg_jc awg_jmin awg_jmax awg_s1 awg_s2 awg_h1 awg_h2 awg_h3 awg_h4; do
+    echo "delete network.$PIAWG_IF.$PBK"
+  done
+  for PBK in description allowed_ips route_allowed_ips persistent_keepalive public_key endpoint_host endpoint_port; do
+    echo "delete network.$PIAWG_PEER.$PBK"
+  done
   echo "set network.$PIAWG_IF.private_key=$WGPLACEHOLDER"
   # PIA's DNS server (iface_dns, kept by dns_apply); the one for the region otherwise
   if ! uci -q get "pia.$PIAWG_IF.iface_dns" >/dev/null; then
     echo "add_list network.$PIAWG_IF.dns=$(dns_wanted)"
   fi
-  echo "set network.$PIAWG_PEER=${PIAPROTO}_${PIAWG_IF}"
   echo "set network.$PIAWG_PEER.description='PIA $(uci -q get "pia.$PIAWG_IF.region_name" | tr -d "'")'"
   # the form of LuCI's own save (the Network pages): dns is a list, multipath is
   # set and a defaultroute of 1 (the default) is left out, so that saving the
@@ -1978,9 +1994,9 @@ persist_batch() {
       else if (k ~ /^peer_/) { sub(/^peer_/, "", k); t=np }
       else next
       if (t==ni && k=="defaultroute" && $3==one) next
+      if (!((t "." k) in seen)) { seen[t "." k]=1; printf("delete %s.%s\n", t, k) }
       printf("%s %s.%s=%s\n", ($1=="option" && !(t==ni && k=="dns") ? "set" : "add_list"), t, k, $3)
     }'
-
 }
 
 # Run a command with the RAM-staged network changes (key, address, server)
@@ -2011,17 +2027,16 @@ persist_run() {
 # if what is there differs from what is wanted.
 ensure_iface_inner() {
   rm -f "$RUNDIR/ucid.t"/*
-  : >"$RUNDIR/ucid/network"
+  # a copy of the persistent file: the batch is applied to it first, and the
+  # flash is written only if that changes something
+  cp /etc/config/network "$RUNDIR/ucid/network" 2>/dev/null || : >"$RUNDIR/ucid/network"
   UCIS="uci -q -c $RUNDIR/ucid -t $RUNDIR/ucid.t"
+  HAVE="$($UCIS show network | sort)"
   {
     persist_batch
     echo "commit network"
   } | $UCIS batch >/dev/null
   WANT="$($UCIS show network | sort)"
-  HAVE="$( (
-    uci -q show "network.$PIAWG_IF"
-    uci -q show "network.$PIAWG_PEER"
-  ) | sort)"
   [ "$WANT" = "$HAVE" ] && return 0
   {
     persist_batch
@@ -2903,7 +2918,7 @@ api_status() {
     --arg id "$(uci -q get pia.account.id)" --arg pw "$(uci -q get pia.account.password)" \
     --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
     --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg stdmtu "$(std_mtu)" \
-    --arg small "$PIA_MTU_SMALL" \
+    --arg small "$PIA_MTU_SMALL" --arg optimal "$PIA_MTU_OPTIMAL" \
     --arg dns "$PIA_DNS" --arg dnsso "$PIA_DNS_SO" --arg dnsmace "$PIA_DNS_MACE" --arg dnssomace "$PIA_DNS_SO_MACE" \
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
     --arg cdir "$ACD" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
@@ -2911,7 +2926,7 @@ api_status() {
     '{version: $version, awg: ($awg == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
       zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan,
-      std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber),
+      std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), optimal_mtu: ($optimal | tonumber),
       dns_servers: {standard: $dns, streaming: $dnsso, mace: $dnsmace, streaming_mace: $dnssomace},
       cache: {regions: $regions, updated: ($listts | tonumber? // 0), checked: ($checked | tonumber? // 0),
               dir: $cdir, ram: ($cram == 1), cron: ($ccron == 1), meta: ($cmeta | tonumber? // 0)},
@@ -3017,7 +3032,7 @@ api_iface_save() {
   case "$A_FW" in '' | yes | no) ;; *) api_fail "Invalid firewall choice" ;; esac
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_MTU" in
-  '' | std | small) ;;
+  '' | std | optimal | small) ;;
   *[!0-9]*) api_fail "Invalid packet size" ;;
   *) { [ "$A_MTU" -ge 576 ] && [ "$A_MTU" -le 1500 ]; } || api_fail "Packet size: 576 to 1500" ;;
   esac
@@ -3105,6 +3120,7 @@ api_iface_save() {
   dns_apply
   case "$A_MTU" in
   std) uci -q set "pia.$AN.iface_mtu=$(std_mtu)" ;;
+  optimal) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_OPTIMAL" ;;
   small) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_SMALL" ;;
   '') ;;
   *) uci -q set "pia.$AN.iface_mtu=$A_MTU" ;;
