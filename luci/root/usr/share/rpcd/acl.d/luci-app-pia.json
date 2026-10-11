@@ -1,0 +1,15 @@
+{
+	"luci-app-pia": {
+		"description": "Grant access to the PIA VPN settings",
+		"read": {
+			"ubus": {
+				"luci.pia": [ "status", "regions", "job_status", "log" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"luci.pia": [ "account", "action", "global_action", "save", "remove" ]
+			}
+		}
+	}
+}
