@@ -24,9 +24,9 @@ const callRemove = rpc.declare({ object: 'luci.pia', method: 'remove', params: [
 const callLog = rpc.declare({ object: 'luci.pia', method: 'log', params: [ 'lines' ] });
 
 const PROTOS = [
-	[ 'amneziawg', _('AmneziaWG') ],
-	[ 'wireguard', _('WireGuard') ],
-	[ 'auto', _('Automatic') ]
+	[ 'amneziawg', _('AmneziaWG'), _('Recommended to prevent WireGuard traffic being throttled or blocked.') ],
+	[ 'wireguard', _('WireGuard'), _('Prone to being blocked or throttled') ],
+	[ 'auto', _('Automatic'), _('Try AmneziaWG, fall back to WireGuard') ]
 ];
 
 function countryName(code) {
@@ -92,8 +92,8 @@ const DNSOPTS = [
 ];
 
 const MTUOPTS = [
-	[ 'std', _('Standard'), _('For IPv4 + IPv6') ],
-	[ 'small', _('Small'), _('Improved compatibility for mobile networks') ]
+	[ 'std', _('Standard'), _('Recommended for IPv4 + IPv6 traffic') ],
+	[ 'small', _('Small'), _('Improve compatibility for mobile networks') ]
 ];
 
 function dnsFor(st, mace, streaming) {
@@ -426,7 +426,7 @@ return view.extend({
 				field(_('Streaming optimised only'), so),
 				field(_('Port forwarding only'), pf),
 				field(_('Non geo-located server'), ng),
-				field(_('Fastest region'), fastCb, _('At each start, use the fastest region of that country (by ping) instead of the one chosen.')),
+				field(_('Fastest region'), fastCb, _('Automatically choose fastest in selected country')),
 				field(_('Region Selection'), regionSel)
 			]);
 		};
@@ -467,7 +467,7 @@ return view.extend({
 				render: () => {
 					const inp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': d.name, 'maxlength': 15,
 						'placeholder': 'pia', 'spellcheck': 'false' });
-					return { node: field(_('Interface Name'), inp, _('Letters, digits and underscore (up to 15). It is also the name of the network interface and of its firewall zone.')),
+					return { node: field(_('Interface Name'), inp, _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')),
 						collect: () => {
 							d.name = inp.value.trim();
 							if (!nameOk(d.name)) return _('Invalid name: 1 to 15 letters, digits or underscore');
@@ -478,10 +478,10 @@ return view.extend({
 			{
 				title: _('Protocol Selection'),
 				render: () => {
-					const s = select(PROTOS.filter(p => st.awg || p[0] == 'wireguard'), d.proto);
-					return { node: field(_('Protocol Selection'), s, st.awg ? _('AmneziaWG is PIA’s option for networks that block or throttle WireGuard.')
-						: _('AmneziaWG is not installed on this router.')),
-						collect: () => { d.proto = s.value; } };
+					const c = selectHelp(PROTOS.filter(p => st.awg || p[0] == 'wireguard'), d.proto, null,
+						st.awg ? null : () => _('AmneziaWG is not installed on this router.'));
+					return { node: field(_('Protocol Selection'), c.node, c.help),
+						collect: () => { d.proto = c.node.value; } };
 				}
 			},
 			{
@@ -501,7 +501,7 @@ return view.extend({
 			{
 				title: _('DNS servers'),
 				render: () => {
-					const c = selectHelp(DNSOPTS, d.dns, null, v => _('Server: %s').format(dnsLabel(st, dnsFor(st, v == 'mace', d.streaming))));
+					const c = selectHelp(DNSOPTS, d.dns);
 					return { node: field(_('DNS servers'), c.node, c.help), collect: () => { d.dns = c.node.value; } };
 				}
 			},
@@ -522,7 +522,7 @@ return view.extend({
 					}
 					return { node: field(_('Default route'), cb, taken
 						? _('Another interface already carries the default route (two cannot work together): the devices to send through this one must be routed by policy.')
-						: _('Send all traffic through this VPN.')),
+						: _('Recommended to send all traffic via PIA.')),
 						collect: () => { d.route = taken ? false : cb.checked; } };
 				}
 			},
@@ -534,10 +534,10 @@ return view.extend({
 					const boxes = zones.map(z => [ z, checkbox(d.forward.indexOf(z) >= 0) ]);
 					const st2 = checkbox(d.strict);
 					return { node: E('div', [
-							field(_('Firewall zone'), fw, _('Create a zone with NAT and MSS clamping for the interface.')),
+							field(_('Firewall zone'), fw, _('Recommended to create zone with NAT and MSS clamping')),
 							field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 								_('The zones whose traffic may go through this VPN.')),
-							field(_('PIA DNS Server'), st2, _('Use PIA by default to prevent DNS leakage'))
+							field(_('PIA DNS Server'), st2, _('Recommended to prevent DNS leakage'))
 						]),
 						collect: () => {
 							d.firewall = fw.checked;
@@ -619,12 +619,12 @@ return view.extend({
 
 	openEdit: function(i) {
 		const st = this.st;
-		const protoSel = select(PROTOS.filter(p => st.awg || p[0] == 'wireguard'),
-			i.auto ? 'auto' : i.proto);
+		const protoCtl = selectHelp(PROTOS.filter(p => st.awg || p[0] == 'wireguard'),
+			i.auto ? 'auto' : i.proto, null,
+			() => i.dip ? _('A dedicated IP needs WireGuard.') : _('Changing the protocol makes a new key and the region must have servers for it.'));
+		const protoSel = protoCtl.node;
 		if (i.dip) protoSel.disabled = true;
-		let streaming = !!i.streaming;
-		const dnsCtl = selectHelp(DNSOPTS, i.dns == 'mace' ? 'mace' : 'standard', null,
-			v => _('Server: %s').format(dnsLabel(st, dnsFor(st, v == 'mace', streaming))));
+		const dnsCtl = selectHelp(DNSOPTS, i.dns == 'mace' ? 'mace' : 'standard');
 		const cur = i.mtu;
 		const custom = (cur && cur != st.std_mtu && cur != st.small_mtu) ? [ [ String(cur), _('Custom (%d)').format(cur), '' ] ] : [];
 		const mtuCtl = selectHelp(MTUOPTS.concat(custom), !cur || cur == st.std_mtu ? 'std' : cur == st.small_mtu ? 'small' : String(cur));
@@ -641,10 +641,7 @@ return view.extend({
 			dom.content(regionBox, field(_('Region Selection'), E('span', i.region.name), _('Set by the dedicated IP.')));
 		}
 		else {
-			picker = this.regionPicker(i.proto, i.region.id ? { id: i.region.id } : null, i.fast, () => {
-				streaming = picker ? picker.get().streaming : streaming;
-				dnsCtl.show();
-			});
+			picker = this.regionPicker(i.proto, i.region.id ? { id: i.region.id } : null, i.fast);
 			dom.content(regionBox, picker.node);
 		}
 
@@ -664,7 +661,7 @@ return view.extend({
 		};
 
 		ui.showModal(_('Settings of %s').format(i.name), [
-			field(_('Protocol Selection'), protoSel, i.dip ? _('A dedicated IP needs WireGuard.') : _('Changing the protocol makes a new key and the region must have servers for it.')),
+			field(_('Protocol Selection'), protoSel, protoCtl.help),
 			regionBox,
 			field(_('DNS servers'), dnsCtl.node, dnsCtl.help),
 			field(_('Packet size (MTU)'), mtuCtl.node, mtuCtl.help),
