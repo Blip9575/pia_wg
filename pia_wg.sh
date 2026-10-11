@@ -15,12 +15,8 @@
 #
 #########
 
-<<<<<<< HEAD
-SCRIPTDL="https://raw.githubusercontent.com/Blip9575/pia_wg/release/pia_wg.sh"
-=======
 # shellcheck disable=SC2329  # persist_run calls some functions indirectly
-SCRIPTDL="https://raw.githubusercontent.com/bolemo/pia_wg/main/pia_wg.sh"
->>>>>>> pia-multi-interface
+SCRIPTDL="https://raw.githubusercontent.com/Blip9575/pia_wg/release/pia_wg.sh"
 SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
 SCRIPTNAME="${SCRIPTPATH##*/}"
 CRON_TAG_WD='# pia watchdog' # (per interface: "# pia watchdog [name]"); cron entries are recognised by these tags, not by the file name
