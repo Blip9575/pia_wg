@@ -16,6 +16,10 @@ const callAccount = rpc.declare({ object: 'luci.pia', method: 'account', params:
 const callAction = rpc.declare({ object: 'luci.pia', method: 'action', params: [ 'name', 'op' ] });
 const callGlobal = rpc.declare({ object: 'luci.pia', method: 'global_action', params: [ 'op' ] });
 const callJob = rpc.declare({ object: 'luci.pia', method: 'job_status', params: [ 'name' ] });
+function routeTaken(name) {
+	return _('Default route already assigned to %s. Recommend configuring policy based routing via mwan3 with luci-app-mwan3.').format(name);
+}
+
 // the arguments an unchanged setting leaves out: rpcd rejects a null (Invalid argument),
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
@@ -461,7 +465,8 @@ return view.extend({
 		const st = this.st;
 		const self = this;
 		const others = st.interfaces;
-		const taken = others.some(i => i.default_route);
+		const holderIf = others.find(i => i.default_route);
+		const taken = !!holderIf;
 		const d = {
 			name: others.some(i => i.name == 'pia') ? '' : 'pia', proto: st.awg ? 'amneziawg' : 'wireguard', dns: 'standard', mtu: 'std',
 			route: !taken, firewall: true, forward: st.lan_zone ? [ st.lan_zone ] : [], strict: true
@@ -531,7 +536,7 @@ return view.extend({
 						cb.checked = false;
 					}
 					return { node: field(_('Default route'), cb, taken
-						? _('Another interface already carries the default route (two cannot work together): the devices to send through this one must be routed by policy.')
+						? routeTaken(holderIf.name)
 						: _('Recommended to send all traffic via PIA.')),
 						collect: () => { d.route = taken ? false : cb.checked; } };
 				}
@@ -675,7 +680,7 @@ return view.extend({
 			regionBox,
 			field(_('DNS servers'), dnsCtl.node, dnsCtl.help),
 			field(_('Packet size (MTU)'), mtuCtl.node, mtuCtl.help),
-			field(_('Default route'), routeCb, holder ? _('%s already carries the default route.').format(holder.name) : null),
+			field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : null),
 			field(_('Firewall zone'), fwCb),
 			field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ])))),
 			E('div', { 'class': 'right' }, [
