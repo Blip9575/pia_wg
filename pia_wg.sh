@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.1.6
+# Version: 1.1.7
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -36,12 +36,17 @@ PIACONF='/etc/config/pia' # one section per interface, named like it; the accoun
 RESERVED_NAMES=' account apitoken vpntoken cache log '
 PIA_DNS1='10.0.0.243' # PIA's DNS servers (what addKey returns)
 PIA_DNS2='10.0.0.242'
-PIA_KEEPALIVE=25            # the official apps' PersistentKeepalive
-UCISTAGEDIR='/tmp/.uci'     # where uci keeps the RAM-staged (uncommitted) changes
-PIAWG_IF='wg_pia'           # the interface being handled (-i NAME, or the only one configured)
-CACHEDEFDIR='/mnt/usb/pia'  # external storage, to spare the router flash
-CACHERAMDIR="$RUNDIR/cache" # used when the external storage is not mounted
-SERVERLIST_URL='https://serverlist.piaservers.net/vpninfo/servers/v6'
+PIA_KEEPALIVE=25 # the official apps' PersistentKeepalive
+# AmneziaWG obfuscation used when the server sends none (as the official app)
+PIA_AWG_DEFAULTS='jc=5 jmin=25 jmax=100 s1=5 s2=3 h1=1234567891 h2=1234567892 h3=1234567893 h4=1234567894'
+UCISTAGEDIR='/tmp/.uci'               # where uci keeps the RAM-staged (uncommitted) changes
+PIAWG_IF='wg_pia'                     # the interface being handled (-i NAME, or the only one configured)
+CACHEDEFDIR='/mnt/usb/pia'            # external storage, to spare the router flash
+CACHERAMDIR="$RUNDIR/cache"           # used when the external storage is not mounted
+SERVERLIST_PATH='/vpninfo/servers/v7' # the Android app's list: it also has the AmneziaWG servers
+SERVERLIST_URL="https://serverlist.piaservers.net$SERVERLIST_PATH"
+PIA_WG_PORT=1337     # WireGuard: addKey
+PIA_AWG_PORT=1338    # AmneziaWG: add-awg-key
 META_MAX=6           # verified meta servers to keep in the cache
 META_PROBES=40       # max meta servers to probe per refresh
 LEGACY_MAXAGE=604800 # age (s) after which the legacy-token regions are probed again
@@ -75,7 +80,7 @@ rundir_init() {
 # Endpoints in use by the interfaces: live ones and those staged
 live_endpoints() {
   for LX in $(iface_list) "$PIAWG_IF"; do
-    wg show "$LX" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}'
+    wgt "$LX" show "$LX" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}'
     uci -q get "network.wgpeer_$LX.endpoint_host"
   done | sort -u | tr '\n' ' '
 }
@@ -84,7 +89,7 @@ live_endpoints() {
 sibling_endpoints() {
   for LX in $(iface_list); do
     [ "$LX" = "$PIAWG_IF" ] && continue
-    wg show "$LX" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}'
+    wgt "$LX" show "$LX" endpoints 2>/dev/null | awk -F'[[:space:]:]' '{print $2}'
     uci -q get "network.wgpeer_$LX.endpoint_host"
     awk -F= '$1=="server_ip"{print $2}' "$RUNDIR/session.$LX" 2>/dev/null
   done | sort -u | tr '\n' ' '
@@ -110,15 +115,42 @@ valid_ifname() {
   return 0
 }
 
+# The protocol of an interface: amneziawg or wireguard
+iface_proto() {
+  case "$(uci -q get "pia.$1.iface_proto")" in
+  amneziawg) echo amneziawg ;;
+  *) echo wireguard ;;
+  esac
+}
+
+# Run the WireGuard tool of an interface ($1) with the other arguments: awg for
+# AmneziaWG ones
+wgt() {
+  WGTI="$1"
+  shift
+  if [ "$(iface_proto "$WGTI")" = 'amneziawg' ]; then awg "$@"; else wg "$@"; fi
+}
+
+# Is AmneziaWG installed (netifd protocol handler and tool)?
+awg_available() {
+  [ -f /lib/netifd/proto/amneziawg.sh ] && command -v awg >/dev/null 2>&1
+}
+
 # Names and files that depend on the interface being handled
 set_ifvars() {
   PIAWG_PEER="wgpeer_$PIAWG_IF"
+  PIAPROTO="$(iface_proto "$PIAWG_IF")"
+  SRVGRP='wg' # which group of the servers list holds its servers
+  [ "$PIAPROTO" = 'amneziawg' ] && SRVGRP='awg'
   SESSION="$RUNDIR/session.$PIAWG_IF"
   WDFAIL="$RUNDIR/watchdog.$PIAWG_IF.fail"
   RENEWFAIL="$RUNDIR/renew.$PIAWG_IF.fail"
   CRON_TAG_WD="# pia watchdog [$PIAWG_IF]"
   # tunnels (ours, any other WireGuard interface): never "the WAN"
-  PIAIFS=" $(iface_list | tr '\n' ' ') $PIAWG_IF $(wg show interfaces 2>/dev/null | tr '\t' ' ') "
+  PIAIFS=" $(iface_list | tr '\n' ' ') $PIAWG_IF $( (
+    wg show interfaces
+    awg show interfaces
+  ) 2>/dev/null | tr '\t' ' ') "
 }
 
 # Is this pid a live pia.sh run (and not a reused pid)?
@@ -251,10 +283,10 @@ pia_wan() {
   WANDEV_SET=1
   WANDEV=''
   # where the tunnel's packets leave, if it has a peer
-  if wg show "$PIAWG_IF" >/dev/null 2>&1; then
-    WEP="$(wg show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit}')"
+  if wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
+    WEP="$(wgt "$PIAWG_IF" show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit}')"
     if [ -n "$WEP" ]; then
-      WMK="$(wg show "$PIAWG_IF" fwmark)"
+      WMK="$(wgt "$PIAWG_IF" show "$PIAWG_IF" fwmark)"
       [ "$WMK" = 'off' ] && WMK=''
       WANDEV="$(ip route get "$WEP" ${WMK:+mark "$WMK"} 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
       [ "$WANDEV" = "$PIAWG_IF" ] && WANDEV=''
@@ -397,7 +429,7 @@ cache_refresh_list() {
   LISTVIA=''
   while read -r IP CN; do
     [ "$IP" ] || continue
-    curl -sf --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$IP:443" "https://$CN/vpninfo/servers/v6" | head -1 >"$TMP"
+    curl -sf --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$IP:443" "https://$CN$SERVERLIST_PATH" | head -1 >"$TMP"
     jq -e '.regions | length > 0' "$TMP" >/dev/null 2>&1 && {
       LISTVIA="$CN"
       break
@@ -502,7 +534,7 @@ cache_show() {
   if [ -s "$CD/servers.json" ]; then
     echo "Servers list: $(jq '.regions | length' "$CD/servers.json") regions, updated $(date -r "$CD/servers.json")"
     PIAREGIONID="$(uci -q get "pia.$PIAWG_IF.region_id")" &&
-      jq -r --arg r "$PIAREGIONID" '.regions[] | select(.id == $r) | .servers.wg[]? | "  wg   \(.ip) \(.cn)"' "$CD/servers.json"
+      jq -r --arg r "$PIAREGIONID" --arg g "$SRVGRP" '.regions[] | select(.id == $r) | .servers[$g][]? | "  \($g)  \(.ip) \(.cn)"' "$CD/servers.json"
   else
     echo "Servers list: none"
   fi
@@ -647,7 +679,7 @@ legacy_stamp() {
 # Numbered list of the online WireGuard regions, (L) marking those needing the
 # legacy token. Uses $PIAREGIONS, $PIASERVPF, $PIASERVGEO, $PIASERVSO and $LEGACYIDS.
 region_names() {
-  echo "$PIAREGIONS" | jq -r --arg l "$LEGACYIDS" ".[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO $PIASERVSO |
+  echo "$PIAREGIONS" | jq -r --arg l "$LEGACYIDS" ".[] | select(.offline==false) | select(.servers.$SRVGRP) $PIASERVPF $PIASERVGEO $PIASERVSO |
     .id as \$id | .name + (if (\$l | split(\" \") | any(.[]; . == \$id)) then \" (L)\" else \"\" end)" | nl -v0
 }
 
@@ -683,8 +715,9 @@ select_region() {
       LSTAMP="$(legacy_stamp)"
     fi
     LEGACYIDS="$(legacy_ids)"
+    [ "$PIAPROTO" = 'amneziawg' ] && LEGACYIDS='' && LSTAMP=''
     echo "Eliminating offline servers…"
-    echo "Eliminating non WireGuard servers…"
+    echo "Eliminating servers without ${PIAPROTO}…"
     while :; do
       read_yn "Port forward only servers" n && PIASERVPF='| select(.port_forward==true) ' || PIASERVPF=''
       read_yn "Geo only servers" n && PIASERVGEO='| select(.geo==true) ' || PIASERVGEO=''
@@ -704,7 +737,7 @@ select_region() {
       read -r AND || exit 1
       case "$AND" in
       '' | *[!0-9]*) PIAREGIONID='' ;;
-      *) PIAREGIONID="$(echo "$PIAREGIONS" | jq -r "[.[] | select(.offline==false) | select(.servers.wg) $PIASERVPF $PIASERVGEO $PIASERVSO ][$AND].id // empty")" ;;
+      *) PIAREGIONID="$(echo "$PIAREGIONS" | jq -r "[.[] | select(.offline==false) | select(.servers.$SRVGRP) $PIASERVPF $PIASERVGEO $PIASERVSO ][$AND].id // empty")" ;;
       esac
       [ -n "$PIAREGIONID" ] && break
       echo "Invalid region number: '$AND'"
@@ -915,17 +948,23 @@ pia_addkey() {
   else
     set -- --data-urlencode "pt=$(legacy_token_hash)"
   fi
-  SERVERS="$(jq -r --arg r "$(uci -q get "pia.$PIAWG_IF.region_id")" \
-    '.regions[] | select(.id == $r) | .servers.wg[]? | "\(.ip) \(.cn) ip"' "$(cache_dir)/servers.json" 2>/dev/null)
-$(uci -q get "pia.$PIAWG_IF.region_dns") - dns"
+  KEYPORT="$PIA_WG_PORT"
+  [ "$PIAPROTO" = 'amneziawg' ] && KEYPORT="$PIA_AWG_PORT"
+  SERVERS="$(jq -r --arg r "$(uci -q get "pia.$PIAWG_IF.region_id")" --arg g "$SRVGRP" --arg p "$KEYPORT" \
+    '.regions[] | select(.id == $r) | .servers[$g][]? | "\(.ip) \(.cn) ip \(.port // $p)"' "$(cache_dir)/servers.json" 2>/dev/null)"
+  # the region host name (legacy) only serves WireGuard
+  [ "$PIAPROTO" = 'amneziawg' ] || SERVERS="$SERVERS
+$(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
+  KEYPATH='addKey'
+  [ "$PIAPROTO" = 'amneziawg' ] && KEYPATH='add-awg-key'
   # one peer per token and server: keep off the servers of the other interfaces
   SIBIPS="$(sibling_endpoints)"
   SERVERS="$(echo "$SERVERS" | awk -v u="$SIBIPS" 'BEGIN{n=split(u,a," ");for(i=1;i<=n;i++)x[a[i]]=1} !($1 in x)')"
   unset ADDKEYAUTHFAIL
-  while read -r HOST CN MODE; do
+  while read -r HOST CN MODE KPORT; do
     case "$MODE" in
-    'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$HOST:1337" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:1337/addKey")" ;;
-    'dns') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} -G "$@" --data-urlencode "pubkey=$PUB" "https://$HOST:1337/addKey")" ;;
+    'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$HOST:$KPORT" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:$KPORT/$KEYPATH")" ;;
+    'dns') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} -G "$@" --data-urlencode "pubkey=$PUB" "https://$HOST:$KPORT/$KEYPATH")" ;;
     *) continue ;;
     esac
     [ "$CODE" = '401' ] && ADDKEYAUTHFAIL=1
@@ -939,6 +978,7 @@ EOS
 
 # Is the configured region marked in the legacy list ('cache probe')?
 region_needs_legacy() {
+  [ "$PIAPROTO" = 'amneziawg' ] && return 1 # measured on the WireGuard servers
   LRID="$(uci -q get "pia.$PIAWG_IF.region_id")" || return 1
   [ -n "$LRID" ] || return 1
   case " $(legacy_ids) " in
@@ -1322,6 +1362,9 @@ dns_strict_set() {
 iface_wizard() {
   WZNEW=''
   uci -q get "pia.$PIAWG_IF.peer_allowed_ips" >/dev/null || WZNEW=1
+  WZPROTO=''
+  # a new interface: which protocol (AmneziaWG by default)
+  [ -z "$WZNEW" ] || uci -q get "pia.$PIAWG_IF.iface_proto" >/dev/null || ask_protocol
   keep_conf_section 'net_interface' || set_defnetiface
   keep_conf_section 'net_peer' || set_defnetpeer
   iface_defaults
@@ -1339,7 +1382,7 @@ iface_wizard() {
 set_iface() {
   NEWIF="$1"
   if [ -z "$NEWIF" ]; then
-    printf "Name of the WireGuard network interface (press enter for %s): " "$PIAWG_IF"
+    printf "Name of the network interface (press enter for %s): " "$PIAWG_IF"
     read -r NEWIF
     [ -z "$NEWIF" ] && NEWIF="$PIAWG_IF"
   fi
@@ -1442,14 +1485,78 @@ EOI
 }
 
 set_defnetiface() {
+  # AmneziaWG unless asked otherwise (or not installed)
+  if [ -z "$WZPROTO" ]; then
+    if awg_available; then WZPROTO='amneziawg'; else WZPROTO='wireguard'; fi
+  fi
   clear_group iface_
   uci -q batch <<EOI >/dev/null
     set pia.$PIAWG_IF=interface
-    set pia.$PIAWG_IF.iface_proto="wireguard"
+    set pia.$PIAWG_IF.iface_proto="$WZPROTO"
     set pia.$PIAWG_IF.iface_defaultroute='1'
     set pia.$PIAWG_IF.iface_delegate='0' # No IPv6 with PIA
     commit pia
 EOI
+  set_ifvars
+}
+
+# Ask which protocol the interface uses ($1: the preselected one), result in
+# $WZPROTO. AmneziaWG is the PIA apps' option for networks that block WireGuard.
+ask_protocol() {
+  WZPROTO=''
+  if ! awg_available; then
+    echo "AmneziaWG is not installed (packages amneziawg-tools, kmod-amneziawg, luci-proto-amneziawg): using WireGuard" >&3
+    WZPROTO='wireguard'
+    return 0
+  fi
+  [ -z "$AUTO" ] || {
+    WZPROTO="${1:-amneziawg}"
+    return 0
+  }
+  APDEF=1
+  [ "$1" = 'wireguard' ] && APDEF=2
+  echo "Protocol:"
+  echo "  1) AmneziaWG   (obfuscated WireGuard, PIA's option for networks that block it)"
+  echo "  2) WireGuard"
+  while :; do
+    printf "Select the protocol (press enter for %s): " "$APDEF"
+    read -r APR || APR=''
+    [ -n "$APR" ] || APR="$APDEF"
+    case "$APR" in
+    1) WZPROTO='amneziawg' ;;
+    2) WZPROTO='wireguard' ;;
+    *)
+      echo "Invalid choice: '$APR'"
+      continue
+      ;;
+    esac
+    return 0
+  done
+}
+
+# Change the protocol of the interface being handled: its network sections and
+# session are dropped (made again at the next start)
+set_protocol() {
+  iface_exists "$PIAWG_IF" || {
+    echo "No interface named '$PIAWG_IF' is configured!" >&2
+    return 1
+  }
+  ask_protocol "$PIAPROTO"
+  if [ "$WZPROTO" = "$PIAPROTO" ]; then
+    echo "$PIAWG_IF already uses $PIAPROTO"
+    return 0
+  fi
+  if [ "$WZPROTO" = 'amneziawg' ] && uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null; then
+    echo "A dedicated IP needs WireGuard; remove its token first" >&2
+    return 1
+  fi
+  ifdown "$PIAWG_IF" >/dev/null 2>&1
+  forget_net
+  rm -f "$SESSION"
+  uci -q set "pia.$PIAWG_IF.iface_proto=$WZPROTO"
+  uci -q commit pia
+  set_ifvars
+  echo "Interface $PIAWG_IF now uses $PIAPROTO: start it again (its region needs $PIAPROTO servers)"
 }
 
 # ---- Session (RAM only), like the official apps ----
@@ -1464,6 +1571,8 @@ session_get() { awk -F= -v k="$1" '$1==k{print substr($0,length(k)+2); exit}' "$
 session_scope() {
   if uci -q get "pia.$PIAWG_IF.dip_ip" >/dev/null; then
     echo "dip:$(uci -q get "pia.$PIAWG_IF.dip_ip")"
+  elif [ "$PIAPROTO" = 'amneziawg' ]; then
+    echo "region:$(uci -q get "pia.$PIAWG_IF.region_id"):amneziawg"
   else
     echo "region:$(uci -q get "pia.$PIAWG_IF.region_id")"
   fi
@@ -1489,6 +1598,7 @@ session_save() {
       echo "server_key=$WGSERVKEY"
       echo "dns1=$WGDNS1"
       echo "dns2=$WGDNS2"
+      echo "obf=$WGOBF"
       echo "time=$(date +%s)"
     } >"$RUNDIR/session.$$.tmp" && mv "$RUNDIR/session.$$.tmp" "$SESSION"
   )
@@ -1618,7 +1728,7 @@ persist_batch() {
     echo "add_list network.$PIAWG_IF.dns=${WGDNS1:-$PIA_DNS1}"
     echo "add_list network.$PIAWG_IF.dns=${WGDNS2:-$PIA_DNS2}"
   fi
-  echo "set network.$PIAWG_PEER=wireguard_${PIAWG_IF}"
+  echo "set network.$PIAWG_PEER=${PIAPROTO}_${PIAWG_IF}"
   echo "set network.$PIAWG_PEER.description='PIA $(uci -q get "pia.$PIAWG_IF.region_name" | tr -d "'")'"
   # the interface's iface_* options go to the network interface, peer_* to the peer
   uci export pia | awk -v qn="'$PIAWG_IF'" -v ni="network.$PIAWG_IF" -v np="network.$PIAWG_PEER" '
@@ -1689,6 +1799,11 @@ stage_session() {
   stage_set "network.$PIAWG_PEER.public_key" "$(session_get server_key)"
   stage_set "network.$PIAWG_PEER.endpoint_host" "$(session_get server_ip)"
   stage_set "network.$PIAWG_PEER.endpoint_port" "$(session_get server_port)"
+  if [ "$PIAPROTO" = 'amneziawg' ]; then
+    for SOP in $(session_get obf); do
+      stage_set "network.$PIAWG_IF.awg_${SOP%%=*}" "${SOP#*=}"
+    done
+  fi
 }
 
 # Is the session what netifd would use?
@@ -1847,6 +1962,9 @@ set_netconf() {
 
   if [ -z "$DIP_STATUS" ]; then
     pia_addkey_any
+  elif [ "$PIAPROTO" = 'amneziawg' ]; then
+    echo "A dedicated IP needs WireGuard: use 'configure protocol'" >&3
+    return 1
   else
     pia_wan
     PIAADDKEY="$(curl -s -k -G ${WANDEV:+--interface "if!$WANDEV"} --connect-to "$(uci -q get "pia.$PIAWG_IF.dip_cn")::$(uci -q get "pia.$PIAWG_IF.dip_ip")" --user "dedicated_ip_$(uci -q get "pia.$PIAWG_IF.dip_token"):$(uci -q get "pia.$PIAWG_IF.dip_ip")" --data-urlencode "pubkey=$WGPUB" "https://$(uci -q get "pia.$PIAWG_IF.dip_cn"):1337/addKey")"
@@ -1864,6 +1982,16 @@ set_netconf() {
   WGDNS1="$(echo "$PIAADDKEY" | jq -r '.dns_servers[0]')"
   WGDNS2="$(echo "$PIAADDKEY" | jq -r '.dns_servers[1]')"
   WGPEERIP="$(echo "$PIAADDKEY" | jq -r '.peer_ip')"
+  # AmneziaWG: the obfuscation parameters of the server (or the official app's)
+  WGOBF=''
+  if [ "$PIAPROTO" = 'amneziawg' ]; then
+    for SOK in jc jmin jmax s1 s2 h1 h2 h3 h4; do
+      SOV="$(echo "$PIAADDKEY" | jq -r --arg k "$SOK" '.obfuscation[$k] // empty' 2>/dev/null)"
+      [ -n "$SOV" ] || SOV="$(echo " $PIA_AWG_DEFAULTS" | sed -n "s/.* $SOK=\([0-9]*\).*/\1/p")"
+      WGOBF="$WGOBF $SOK=$SOV"
+    done
+    WGOBF="${WGOBF# }"
+  fi
 
   session_save "$WGPRIV"
   NETCHANGED=''
@@ -1877,7 +2005,7 @@ set_netconf() {
   # netifd only rereads the config on a reload, which restarts a running
   # interface whose settings changed
   if [ -n "$NETCHANGED" ]; then
-    if [ -n "$APPLY" ] || ! wg show "$PIAWG_IF" >/dev/null 2>&1; then
+    if [ -n "$APPLY" ] || ! wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
       net_reload
     else
       echo "Network settings changed; they apply at the next ifup (or use 'renew --apply')" >&3
@@ -1958,9 +2086,9 @@ stop_wgpia() {
 }
 
 check_wg() {
-  if wg show "$PIAWG_IF" >/dev/null 2>&1; then
-    PIAWG_EP="$(wg show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit;}')"
-    PIAWG_MK="$(wg show "$PIAWG_IF" fwmark)"
+  if wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
+    PIAWG_EP="$(wgt "$PIAWG_IF" show "$PIAWG_IF" endpoints | awk -F'[[:space:]:]' '{print $2; exit;}')"
+    PIAWG_MK="$(wgt "$PIAWG_IF" show "$PIAWG_IF" fwmark)"
     [ "$PIAWG_MK" = "off" ] && PIAWG_MK=''
     # never leave the endpoint routed through the tunnel (routing loop)
     if ! endpoint_route "$PIAWG_EP" check; then
@@ -1969,9 +2097,9 @@ check_wg() {
       return 1
     fi
     WAN_IF="$(ip route get "$PIAWG_EP" ${PIAWG_MK:+mark "$PIAWG_MK"} | awk '{for(i=0;i<NF;i++){if($i=="dev"){print $++i; exit;}}}')"
-    echo "WireGuard PIA interface: UP"
+    echo "PIA interface ($PIAPROTO): UP"
   else
-    echo "WireGuard PIA interface: DOWN!" >&3
+    echo "PIA interface ($PIAPROTO): DOWN!" >&3
     return 1
   fi
 
@@ -2022,7 +2150,7 @@ watchdog_failed() {
 
 # Seconds since the tunnel's last handshake (nothing if none)
 handshake_age() {
-  HSEC="$(wg show "$PIAWG_IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')"
+  HSEC="$(wgt "$PIAWG_IF" show "$PIAWG_IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')"
   [ -n "$HSEC" ] && [ "$HSEC" -gt 0 ] || return 1
   echo $(($(date +%s) - HSEC))
 }
@@ -2059,7 +2187,7 @@ renew_cmd() {
     echo "The tunnel is up (handshake ${HSECGE}s ago): nothing to renew (use --force)"
     return 0
   fi
-  if [ -n "$RNEWKEY" ] && [ -z "$RAPPLY" ] && wg show "$PIAWG_IF" >/dev/null 2>&1; then
+  if [ -n "$RNEWKEY" ] && [ -z "$RAPPLY" ] && wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
     echo "The interface is up: a new key needs a restart of it; add --apply" >&2
     return 1
   fi
@@ -2235,6 +2363,7 @@ print_usage() {
   echo "    - configure region   : set/choose PIA region"
   echo "    - configure keys     : (the keys are kept in RAM only; nothing to configure)"
   echo "    - configure interface [name] : create an interface (a section of /etc/config/pia)"
+  echo "    - configure protocol : AmneziaWG or WireGuard for the interface (asked when it is created)"
   echo "    - configure rename <name>    : rename the interface (-i old)"
   echo "    - configure remove <name>    : forget an interface (config, network sections, cron)"
   echo "    - configure cache    : set offline cache directory and options"
@@ -2426,6 +2555,10 @@ case "$1" in
     iface_wizard
     ;;
   'rename') rename_iface "$3" ;;
+  'protocol')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
+    set_protocol
+    ;;
   'remove') remove_iface "${3:-$SELIF}" ;;
   *)
     echo "Unknown configure subcommand '$2'!"

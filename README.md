@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.1.6 (upstream 1.0.16)
+1.1.7 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -19,6 +19,7 @@ Changes compared to upstream 1.0.16:
   - Fixes: server list error check, connectivity check on tunnels whose first hop does not answer, `jq` without regex support, `update` refusing anything that is not a valid script
   - The WireGuard key pair and the server settings are kept in RAM only (like the official apps); the persistent network config is written only when it changes; `renew` (cron, ifup hook) replaces the watchdog for an ordinary `ifup`/`ifdown` managed interface, and the watchdog backs off after failed restarts
   - One config, `/etc/config/pia` (was `pia_wg`), with a section per interface named like it: several PIA interfaces on one router (`-i NAME`), sharing the account, tokens and cache; the script, cron tags, hook, log and cache directory use `pia` names (older names are converted on the first run)
+  - AmneziaWG (PIA's obfuscated WireGuard, as in the Android app) is the default protocol of a new interface: `iface_proto`, asked right after the name, `configure protocol`; the servers list is the v7 one
 
 ## Install
   - Connect to your OpenWrt router with SSH
@@ -105,6 +106,7 @@ config interface 'vpn_pia'
 
 ### When an interface is created
 `configure interface NAME` (and `configure all`) asks, with the answer in capitals taken by enter:
+  - **Protocol**, right after the name: `1) AmneziaWG` (the default) or `2) WireGuard`. AmneziaWG is WireGuard with obfuscated handshakes, the option the official apps use on networks that block WireGuard (`vpninfo/servers/v7` lists its servers in the `awg` group, port 1338). The key is registered with `add-awg-key` (same VPN token, same one-peer-per-token-and-server rule; an AmneziaWG and a WireGuard peer of the same token do not evict each other) and the obfuscation parameters the server returns (`jc, jmin, jmax, s1, s2, h1..h4`) are staged in RAM with the key. It needs `amneziawg-tools`, `kmod-amneziawg` and `luci-proto-amneziawg`; without them the interface is created as WireGuard. A dedicated IP is WireGuard only. `configure protocol` changes it later (the interface's network sections and session are dropped; start it again, with a region that has servers of that protocol). The interface's `iface_proto` option holds it (`amneziawg` or `wireguard`).
   - **Default route**: `Route all traffic through NAME (default route)? (Y/n)`. With several PIA interfaces none may have it (a second default route would make one VPN run inside the other, and routing then has to be done by policy routing, firewall marks or per-device routes, which the script does not set up): creating a second interface asks `Remove the default route from all PIA interfaces?` (Y removes it from all, n only keeps it off the new one); the interfaces without it route just the two PIA DNS hosts, so that they can still be tested. Running tunnels change at their next restart. When one interface is left, `configure remove` offers the default route back. `configure route` asks again.
   - **Firewall**: `Create firewall zone 'NAME' with NAT and MSS clamping? (Y/n)` creates a zone named like the interface (input and forward DROP, masquerading, MSS clamping, marked `pia_managed`) and then asks which zones may forward to it (enter for the LAN zone, `-` for none). An existing zone with that name is adopted after asking, never removed. The firewall is checked (`fw4 check`) and reloaded only when something changed; only `configure` touches it, never start, renew or the hook. `configure firewall` asks again, `configure remove` removes the zone and forwardings the script made.
   - **DNS**: the interface carries PIA's DNS servers (those `addKey` returns, 10.0.0.243 and 10.0.0.242 normally; set `iface_dns` to use others) with `dns_metric 1`, so they come first in `resolv.conf.auto`. dnsmasq only keeps that order with `strictorder`: `Set strict-order on them? (Y/n)` offers it for the dnsmasq instances that use the interfaces' servers (not those with `noresolv`, such as an instance with its own upstream: its clients do not use PIA's DNS at all).
