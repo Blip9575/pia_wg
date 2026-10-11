@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.2.7
+# Version: 1.3.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -34,12 +34,16 @@ LOGDEFPATH='/var/log/pia'
 LOGNAME='pia.log'
 PIACONF='/etc/config/pia' # one section per interface, named like it; the account, tokens, cache and log are shared
 RESERVED_NAMES=' account apitoken vpntoken cache log '
-PIA_DNS1='10.0.0.243' # PIA's DNS servers (what addKey returns)
-PIA_DNS2='10.0.0.242'
-PIA_MACE_DNS='10.0.0.241' # PIA DNS that also blocks ads, trackers and malware
-PIA_MTU_SMALL=1280        # the Android app's 'small packets' WireGuard MTU
-PIA_MTU_OVERHEAD=80       # WAN MTU minus this = PIA's standard (the desktop app, 1420 on 1500)
-PIA_KEEPALIVE=25          # the official apps' PersistentKeepalive
+# PIA's DNS servers (private addresses, reachable through the tunnel): DNS,
+# DNS + streaming (streaming optimised regions, '-so.' in their DNS name),
+# DNS + MACE (also blocks ads, trackers and malware) and both
+PIA_DNS='10.0.0.242'
+PIA_DNS_SO='10.0.0.243'
+PIA_DNS_MACE='10.0.0.244'
+PIA_DNS_SO_MACE='10.0.0.241'
+PIA_MTU_SMALL=1280  # the Android app's 'small packets' WireGuard MTU
+PIA_MTU_OVERHEAD=80 # WAN MTU minus this = PIA's standard (the desktop app, 1420 on 1500)
+PIA_KEEPALIVE=25    # the official apps' PersistentKeepalive
 # AmneziaWG obfuscation used when the server sends none (as the official app)
 PIA_AWG_DEFAULTS='jc=5 jmin=25 jmax=100 s1=5 s2=3 h1=1234567891 h2=1234567892 h3=1234567893 h4=1234567894'
 UCISTAGEDIR='/tmp/.uci'               # where uci keeps the RAM-staged (uncommitted) changes
@@ -699,6 +703,7 @@ store_region() {
     set pia.$PIAWG_IF.region_country="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .country")"
     commit pia
 EOI
+  dns_apply
 }
 
 select_region() {
@@ -1120,10 +1125,59 @@ others_list() { iface_list | grep -vx "$PIAWG_IF"; }
 
 # set_default_route yes|no: all traffic through the interface, or only the
 # PIA DNS hosts (so that it can still be tested and used for DNS)
-# The DNS servers of the interface: its own (iface_dns) or PIA's
+# The DNS server of the interface (iface_dns)
 dns_hosts() {
   DHL="$(uci -q get "pia.$PIAWG_IF.iface_dns")"
-  echo "${DHL:-$PIA_DNS1 $PIA_DNS2}"
+  echo "${DHL:-$(dns_wanted)}"
+}
+
+# Has the interface MACE (iface_mace; an old MACE choice was iface_dns 10.0.0.241)?
+dns_mace() {
+  [ "$(uci -q get "pia.$PIAWG_IF.iface_mace")" = '1' ] && return 0
+  [ -z "$(uci -q get "pia.$PIAWG_IF.iface_mace")" ] &&
+    [ "$(uci -q get "pia.$PIAWG_IF.iface_dns")" = "$PIA_DNS_SO_MACE" ]
+}
+
+# The PIA DNS server the interface should use: by its region (streaming
+# optimised: '-so.' in its DNS name) and by MACE
+dns_wanted() {
+  DWSO=0
+  case "$(uci -q get "pia.$PIAWG_IF.region_dns")" in
+  *-so.*) DWSO=1 ;;
+  esac
+  DWM=0
+  dns_mace && DWM=1
+  case "$DWSO$DWM" in
+  11) echo "$PIA_DNS_SO_MACE" ;;
+  10) echo "$PIA_DNS_SO" ;;
+  01) echo "$PIA_DNS_MACE" ;;
+  *) echo "$PIA_DNS" ;;
+  esac
+}
+
+# Make iface_dns what dns_wanted says (a DNS server of our own is left alone);
+# the old MACE choice is migrated to iface_mace
+dns_apply() {
+  DAC="$(uci -q get "pia.$PIAWG_IF.iface_dns")"
+  case "$DAC" in
+  '' | "$PIA_DNS" | "$PIA_DNS_SO" | "$PIA_DNS_MACE" | "$PIA_DNS_SO_MACE") ;;
+  *) return 0 ;;
+  esac
+  DAM=''
+  if [ -z "$(uci -q get "pia.$PIAWG_IF.iface_mace")" ] && dns_mace; then
+    uci -q set "pia.$PIAWG_IF.iface_mace=1"
+    DAM=1
+  fi
+  DAW="$(dns_wanted)"
+  if [ "$DAC" = "$DAW" ]; then
+    [ -z "$DAM" ] || uci -q commit pia
+    return 0
+  fi
+  uci -q set "pia.$PIAWG_IF.iface_dns=$DAW"
+  uci -q commit pia
+  # without the default route only the DNS host is routed to the tunnel
+  has_default_route "$PIAWG_IF" || set_default_route no
+  return 0
 }
 
 set_default_route() {
@@ -1625,33 +1679,34 @@ set_protocol() {
   echo "Interface $PIAWG_IF now uses ${WZMODE:+automatic selection, now }$PIAPROTO: start it again (its region needs $PIAPROTO servers)"
 }
 
-# DNS servers: PIA's standard ones or MACE (also blocks ads, trackers, malware)
+# DNS servers: PIA's or MACE (also blocks ads, trackers and malware). The
+# address follows from that and the region (streaming optimised or not).
 ask_dns() {
   [ -z "$AUTO" ] || return 0
   ADDEF=1
-  [ "$(uci -q get "pia.$PIAWG_IF.iface_dns")" = "$PIA_MACE_DNS" ] && ADDEF=2
-  echo "DNS servers:"
-  echo "  1) PIA standard"
-  echo "  2) PIA with MACE (blocks ads, trackers and malware)"
+  dns_mace && ADDEF=2
+  echo "DNS servers (the streaming optimised regions have their own: $PIA_DNS_SO, $PIA_DNS_SO_MACE with MACE):"
+  echo "  1) PIA standard ($PIA_DNS)"
+  echo "  2) PIA with MACE ($PIA_DNS_MACE; blocks ads, trackers and malware)"
   while :; do
     printf "Select the DNS servers (press enter for %s): " "$ADDEF"
     read -r ADR || ADR=''
     [ -n "$ADR" ] || ADR="$ADDEF"
     case "$ADR" in
     1)
-      uci -q delete "pia.$PIAWG_IF.iface_dns"
+      uci -q set "pia.$PIAWG_IF.iface_mace=0"
       break
       ;;
     2)
-      uci -q set "pia.$PIAWG_IF.iface_dns=$PIA_MACE_DNS"
+      uci -q set "pia.$PIAWG_IF.iface_mace=1"
       break
       ;;
     *) echo "Invalid choice: '$ADR'" ;;
     esac
   done
   uci -q commit pia
-  # without the default route only the DNS hosts are routed to the tunnel
-  has_default_route "$PIAWG_IF" || set_default_route no
+  dns_apply
+  echo "DNS server: $(uci -q get "pia.$PIAWG_IF.iface_dns")"
 }
 
 # The tunnel MTU PIA's apps use: the WAN's minus 80 (1420 on 1500)
@@ -1861,10 +1916,9 @@ persist_batch() {
   echo "delete network.$PIAWG_PEER"
   echo "set network.$PIAWG_IF=interface"
   echo "set network.$PIAWG_IF.private_key=$WGPLACEHOLDER"
-  # PIA's DNS servers, unless the interface has its own (iface_dns)
+  # PIA's DNS server (iface_dns, kept by dns_apply); the one for the region otherwise
   if ! uci -q get "pia.$PIAWG_IF.iface_dns" >/dev/null; then
-    echo "add_list network.$PIAWG_IF.dns=${WGDNS1:-$PIA_DNS1}"
-    echo "add_list network.$PIAWG_IF.dns=${WGDNS2:-$PIA_DNS2}"
+    echo "add_list network.$PIAWG_IF.dns=$(dns_wanted)"
   fi
   echo "set network.$PIAWG_PEER=${PIAPROTO}_${PIAWG_IF}"
   echo "set network.$PIAWG_PEER.description='PIA $(uci -q get "pia.$PIAWG_IF.region_name" | tr -d "'")'"
@@ -2031,6 +2085,7 @@ check_conf() {
     [ "$AUTO" ] && return 1
     set_iface "$PIAWG_IF" || return 1
   }
+  dns_apply
   uci -q get "pia.$PIAWG_IF.iface_proto" >/dev/null &&
     echo "Network interface options are configured" ||
     {
@@ -2233,6 +2288,7 @@ EOF
     set pia.$PIAWG_IF.region_dns="$FRDNS"
     commit pia
 EOI
+  dns_apply
 }
 
 # One attempt: register a new key, bring the interface up, wait for the
@@ -2738,14 +2794,16 @@ api_iface_json() {
   has_default_route "$PIAWG_IF" && AIDR=1
   AIAUTO=0
   proto_is_auto "$PIAWG_IF" && AIAUTO=1
+  AIMACE=0
+  dns_mace && AIMACE=1
   jq -nc --arg name "$PIAWG_IF" \
     --arg rid "$(uci -q get "pia.$PIAWG_IF.region_id")" \
     --arg rname "$(uci -q get "pia.$PIAWG_IF.region_name")" \
+    --arg rdns "$(uci -q get "pia.$PIAWG_IF.region_dns")" \
     --arg rcountry "$(uci -q get "pia.$PIAWG_IF.region_country")" \
     --arg fast "$(uci -q get "pia.$PIAWG_IF.region_fast")" \
     --arg proto "$PIAPROTO" --argjson auto "$AIAUTO" \
-    --arg dns "$(uci -q get "pia.$PIAWG_IF.iface_dns")" \
-    --arg mace "$PIA_MACE_DNS" \
+    --arg dnsip "$(dns_hosts)" --argjson mace "$AIMACE" \
     --arg mtu "$(uci -q get "pia.$PIAWG_IF.iface_mtu")" \
     --argjson route "$AIDR" \
     --arg fw "$(uci -q get "pia.$PIAWG_IF.fw_zone")" \
@@ -2756,7 +2814,8 @@ api_iface_json() {
     '{name: $name,
       region: {id: $rid, name: $rname, country: $rcountry},
       fast: ($fast == "1"), proto: $proto, auto: ($auto == 1),
-      dns: (if $dns == "" then "standard" elif $dns == $mace then "mace" else $dns end),
+      dns: (if $mace == 1 then "mace" else "standard" end), dns_ip: $dnsip,
+      streaming: ($rdns | contains("-so.")),
       mtu: ($mtu | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
       dip: ($dip != ""), up: $up, handshake: ($hs | tonumber? // null),
@@ -2788,14 +2847,16 @@ api_status() {
     --arg id "$(uci -q get pia.account.id)" --arg pw "$(uci -q get pia.account.password)" \
     --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
     --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg stdmtu "$(std_mtu)" \
-    --arg small "$PIA_MTU_SMALL" --arg mace "$PIA_MACE_DNS" \
+    --arg small "$PIA_MTU_SMALL" \
+    --arg dns "$PIA_DNS" --arg dnsso "$PIA_DNS_SO" --arg dnsmace "$PIA_DNS_MACE" --arg dnssomace "$PIA_DNS_SO_MACE" \
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
     --arg cdir "$ACD" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
     --argjson job "$(api_job_json _global)" \
     '{version: $version, awg: ($awg == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
       zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan,
-      std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), mace_dns: $mace,
+      std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber),
+      dns_servers: {standard: $dns, streaming: $dnsso, mace: $dnsmace, streaming_mace: $dnssomace},
       cache: {regions: $regions, updated: ($listts | tonumber? // 0), checked: ($checked | tonumber? // 0),
               dir: $cdir, ram: ($cram == 1), cron: ($ccron == 1), meta: ($cmeta | tonumber? // 0)},
       job: $job, now: (now | floor), interfaces: .}'
@@ -2979,17 +3040,12 @@ api_iface_save() {
   1) uci -q set "pia.$AN.region_fast=1" ;;
   0) uci -q delete "pia.$AN.region_fast" ;;
   esac
-  AWROUTE=''
   case "$A_DNS" in
-  standard)
-    uci -q delete "pia.$AN.iface_dns"
-    AWROUTE=1
-    ;;
-  mace)
-    uci -q set "pia.$AN.iface_dns=$PIA_MACE_DNS"
-    AWROUTE=1
-    ;;
+  standard) uci -q set "pia.$AN.iface_mace=0" ;;
+  mace) uci -q set "pia.$AN.iface_mace=1" ;;
   esac
+  uci -q commit pia
+  dns_apply
   case "$A_MTU" in
   std) uci -q set "pia.$AN.iface_mtu=$(std_mtu)" ;;
   small) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_SMALL" ;;
@@ -3000,7 +3056,6 @@ api_iface_save() {
   case "$A_ROUTE" in
   yes) has_default_route "$AN" || set_default_route yes ;;
   no) ! has_default_route "$AN" || set_default_route no ;;
-  *) [ -z "$AWROUTE" ] || has_default_route "$AN" || set_default_route no ;;
   esac
   # the firewall zone, NAT and forwardings
   case "$A_FW" in

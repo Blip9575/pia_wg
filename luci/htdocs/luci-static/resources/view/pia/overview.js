@@ -66,8 +66,19 @@ function fail(res) {
 	return false;
 }
 
-function dnsLabel(d) {
-	return d == 'standard' ? _('PIA standard') : d == 'mace' ? _('PIA with MACE (blocks ads, trackers, malware)') : d;
+// the PIA DNS server of a MACE choice and a streaming optimised region (as pia.sh does)
+function dnsFor(st, mace, streaming) {
+	const d = st.dns_servers;
+	return streaming ? (mace ? d.streaming_mace : d.streaming) : (mace ? d.mace : d.standard);
+}
+
+function dnsLabel(st, ip) {
+	const d = st.dns_servers, names = {};
+	names[d.standard] = _('PIA DNS');
+	names[d.streaming] = _('PIA DNS + streaming');
+	names[d.mace] = _('PIA DNS + MACE');
+	names[d.streaming_mace] = _('PIA DNS + streaming + MACE');
+	return (names[ip] || _('DNS')) + ' ' + ip;
 }
 
 return view.extend({
@@ -224,7 +235,7 @@ return view.extend({
 
 	settingsCell: function(i) {
 		const parts = [];
-		parts.push(dnsLabel(i.dns));
+		parts.push(dnsLabel(this.st, i.dns_ip));
 		parts.push(_('MTU %s').format(i.mtu || _('default')));
 		parts.push(i.default_route ? _('default route') : _('no default route'));
 		if (i.firewall) parts.push(_('zone %s').format(i.name) + (i.forward.length ? ' ← ' + i.forward.join(', ') : ''));
@@ -334,7 +345,7 @@ return view.extend({
 	// ---- region picker (wizard and edit) ------------------------------------
 
 	// -> { node, get(): { region, fast } }; 'proto' picks the servers list
-	regionPicker: function(proto, current, fast, onready) {
+	regionPicker: function(proto, current, fast, onchange) {
 		const box = E('div');
 		const state = { region: current ? current.id : '', fast: !!fast, regions: null };
 		const self = this;
@@ -358,13 +369,14 @@ return view.extend({
 			let country = state.country || (cur ? cur.country : (codes.indexOf('GB') >= 0 ? 'GB' : codes[0]));
 			state.country = country;
 
-			const regionSel = E('select', { 'class': 'cbi-input-select', 'change': ev => { state.region = ev.target.value; } });
+			const regionSel = E('select', { 'class': 'cbi-input-select', 'change': ev => { state.region = ev.target.value; if (onchange) onchange(); } });
 			const fill = () => {
 				const items = list.filter(r => r.country == state.country
 					&& (!state.so || r.streaming) && (!state.pf || r.port_forward));
 				dom.content(regionSel, items.map(r => E('option', { 'value': r.id, 'selected': r.id == state.region ? '' : null }, r.name)));
 				if (!items.some(r => r.id == state.region)) state.region = items.length ? items[0].id : '';
 				regionSel.value = state.region;
+				if (onchange) onchange();
 			};
 			const countrySel = select(codes.map(c => [ c, '%s (%d)'.format(countryName(c), countries[c]) ]), country, ev => {
 				state.country = ev.target.value;
@@ -386,7 +398,6 @@ return view.extend({
 		const load = () => callRegions(proto).then(r => {
 			state.regions = (r && r.ok && r.regions) || [];
 			draw();
-			if (onready) onready();
 		});
 
 		dom.content(box, E('p', { 'class': 'spinning' }, _('Loading the regions…')));
@@ -394,7 +405,7 @@ return view.extend({
 
 		return { node: box, get: () => {
 			const r = (state.regions || []).find(x => x.id == state.region);
-			return { region: state.region, name: r ? r.name : state.region, fast: state.fast };
+			return { region: state.region, name: r ? r.name : state.region, fast: state.fast, streaming: !!(r && r.streaming) };
 		}, state: state };
 	},
 
@@ -446,6 +457,7 @@ return view.extend({
 						if (!g.region) return _('Choose a region');
 						d.region = { id: g.region };
 						d.regionName = g.name;
+						d.streaming = g.streaming;
 						d.fast = g.fast;
 					} };
 				}
@@ -453,8 +465,11 @@ return view.extend({
 			{
 				title: _('DNS servers'),
 				render: () => {
-					const s = select([ [ 'standard', _('PIA standard') ], [ 'mace', _('PIA with MACE (blocks ads, trackers and malware)') ] ], d.dns);
-					return { node: field(_('DNS servers'), s), collect: () => { d.dns = s.value; } };
+					const hint = E('span');
+					const show = () => dom.content(hint, _('Server: %s').format(dnsLabel(st, dnsFor(st, s.value == 'mace', d.streaming))));
+					const s = select([ [ 'standard', _('PIA standard') ], [ 'mace', _('PIA with MACE (blocks ads, trackers and malware)') ] ], d.dns, show);
+					show();
+					return { node: field(_('DNS servers'), s, hint), collect: () => { d.dns = s.value; } };
 				}
 			},
 			{
@@ -506,7 +521,7 @@ return view.extend({
 						[ _('Interface'), d.name ],
 						[ _('Protocol'), PROTOS.filter(p => p[0] == d.proto)[0][1].replace(/ \(.*/, '') ],
 						[ _('Region'), d.regionName + (d.fast ? ' · ' + _('fastest of its country at each start') : '') ],
-						[ _('DNS servers'), dnsLabel(d.dns) ],
+						[ _('DNS servers'), dnsLabel(st, dnsFor(st, d.dns == 'mace', d.streaming)) ],
 						[ _('Packet size'), d.mtu == 'std' ? _('Standard (%d)').format(st.std_mtu) : _('Small (%d)').format(st.small_mtu) ],
 						[ _('Default route'), d.route ? _('yes') : _('no') ],
 						[ _('Firewall'), d.firewall ? _('zone %s, forwarding from: %s').format(d.name, d.forward.join(', ') || _('none')) : _('none') ]
@@ -575,8 +590,12 @@ return view.extend({
 		const protoSel = select(PROTOS.filter(p => st.awg || p[0] == 'wireguard'),
 			i.auto ? 'auto' : i.proto);
 		if (i.dip) protoSel.disabled = true;
+		const dnsHint = E('span');
+		let streaming = !!i.streaming;
+		const showDns = () => dom.content(dnsHint, _('Server: %s').format(dnsLabel(st, dnsFor(st, dnsSel.value == 'mace', streaming))));
 		const dnsSel = select([ [ 'standard', _('PIA standard') ], [ 'mace', _('PIA with MACE (blocks ads, trackers and malware)') ] ],
-			i.dns == 'mace' ? 'mace' : 'standard');
+			i.dns == 'mace' ? 'mace' : 'standard', showDns);
+		showDns();
 		const stdOpt = [ 'std', _('Standard (%d, PIA’s)').format(st.std_mtu) ];
 		const smallOpt = [ 'small', _('Small (%d, for networks that drop or fragment large packets)').format(st.small_mtu) ];
 		const cur = i.mtu;
@@ -595,7 +614,10 @@ return view.extend({
 			dom.content(regionBox, field(_('Region'), E('span', i.region.name), _('Set by the dedicated IP.')));
 		}
 		else {
-			picker = this.regionPicker(i.proto, i.region.id ? { id: i.region.id } : null, i.fast);
+			picker = this.regionPicker(i.proto, i.region.id ? { id: i.region.id } : null, i.fast, () => {
+				streaming = picker ? picker.get().streaming : streaming;
+				showDns();
+			});
 			dom.content(regionBox, picker.node);
 		}
 
@@ -617,7 +639,7 @@ return view.extend({
 		ui.showModal(_('Settings of %s').format(i.name), [
 			field(_('Protocol'), protoSel, i.dip ? _('A dedicated IP needs WireGuard.') : _('Changing the protocol makes a new key and the region must have servers for it.')),
 			regionBox,
-			field(_('DNS servers'), dnsSel),
+			field(_('DNS servers'), dnsSel, dnsHint),
 			field(_('Packet size (MTU)'), mtuSel),
 			field(_('Default route'), routeCb, holder ? _('%s already carries the default route.').format(holder.name) : null),
 			field(_('Firewall zone'), fwCb),
