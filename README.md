@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.2.6 (upstream 1.0.16)
+1.2.7 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -43,7 +43,7 @@ For a typical setup (direct all LAN traffic to/from internet through the newly c
 - Navigate to Network > Firewall
 - Create a new Zone, name it PIA or whatever you want
 - In the General Settings tab, enable **Masquerading** and **MSS Clamping**, then add **LAN** to **Allow forward from source zones**
-- In the Advanced Settings tab, set **Covered Devices** to **wg_pia**
+- In the Advanced Settings tab, set **Covered Devices** to **pia** (or the name of the interface)
 - Save the zone
 - Now edit your zone starting with **LAN**
 - Set **Allow forward to destination zones** to **PIA** or whatever you named the previously created zone
