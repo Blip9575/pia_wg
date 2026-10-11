@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.2.0
+# Version: 1.2.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2813,8 +2813,8 @@ api_account() {
   api_ok
 }
 
-# api_login: log in with the stored account (fresh tokens)
-api_login() {
+# api_relogin: log in with the stored account (fresh tokens)
+api_relogin() {
   uci -q get pia.account.id >/dev/null || api_fail "No account is configured"
   uci -q delete pia.apitoken
   uci -q delete pia.vpntoken
@@ -3043,7 +3043,7 @@ api_cmd() {
   status) api_status ;;
   regions) api_regions "$2" ;;
   account) api_account ;;
-  login) api_login ;;
+  login) api_relogin ;;
   refresh-list)
     pia_wan
     if cache_refresh_list; then
