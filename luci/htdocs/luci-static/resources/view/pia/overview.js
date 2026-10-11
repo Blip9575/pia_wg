@@ -16,10 +16,18 @@ const callAccount = rpc.declare({ object: 'luci.pia', method: 'account', params:
 const callAction = rpc.declare({ object: 'luci.pia', method: 'action', params: [ 'name', 'op' ] });
 const callGlobal = rpc.declare({ object: 'luci.pia', method: 'global_action', params: [ 'op' ] });
 const callJob = rpc.declare({ object: 'luci.pia', method: 'job_status', params: [ 'name' ] });
-const callSave = rpc.declare({
+// the arguments an unchanged setting leaves out: rpcd rejects a null (Invalid argument),
+// so they are sent as an object holding only the given ones
+const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: [ 'name', 'proto', 'region', 'fast', 'dns', 'mtu', 'route', 'firewall', 'forward', 'strict' ]
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, mtu: 1, route: 1, firewall: 1, forward: 1, strict: 1 }
 });
+function callSave(...a) {
+	const keys = [ 'name', 'proto', 'region', 'fast', 'dns', 'mtu', 'route', 'firewall', 'forward', 'strict' ];
+	const o = {};
+	keys.forEach((k, n) => { if (a[n] != null) o[k] = a[n]; });
+	return callSaveObj(o);
+}
 const callRemove = rpc.declare({ object: 'luci.pia', method: 'remove', params: [ 'name' ] });
 const callLog = rpc.declare({ object: 'luci.pia', method: 'log', params: [ 'lines' ] });
 
