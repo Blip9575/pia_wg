@@ -120,12 +120,8 @@ config interface 'vpn_pia'
 ## Web interface (LuCI)
 `pia_wg.sh luci install` adds **Services > PIA VPN** to LuCI (the files are in the `luci/` directory of the repository: a view, a menu entry, an ACL and an rpcd plugin that calls the script's `api` commands; `luci remove` removes them; log in to LuCI again afterwards). It uses LuCI's own widgets, so it follows the theme, including its dark mode.
   - **Account**: the PIA user id and password (the password is write-only), the token state, *Renew login* and *Refresh servers and tokens*.
-<<<<<<< HEAD
   - **Cache** (under the account): servers list size and when it was last checked, verified meta servers, where it is kept (RAM = lost at a reboot) and whether the refresh cron is installed.
-  - **Interfaces**: one row per interface with its region, protocol, settings and state (handshake age, endpoint), and Start, Stop, Restart, Edit and Remove. **Add interface…** opens the wizard: name, protocol (AmneziaWG, WireGuard or automatic), region (country, region, streaming/port forwarding filters, fastest region), DNS servers (standard or MACE), packet size, default route, firewall zone and forwardings (and dnsmasq strict order), then a review. It offers to start the new interface.
-=======
   - **Interfaces**: one row per interface with its region, protocol, settings and state (handshake age, endpoint), and Start, Stop, Restart, Edit and Remove. **Add interface…** opens the wizard: name, protocol (AmneziaWG, WireGuard or automatic), region (country, region, streaming/port forwarding filters, fastest region), DNS servers (standard or MACE; the address shown follows the region), packet size, default route, firewall zone and forwardings (and dnsmasq strict order), then a review. It offers to start the new interface.
->>>>>>> pia-multi-interface
   - Start, restart, stop and logins run in the background (the page follows the output); a change of settings applies at the next start or restart.
   - What it cannot do (use `configure` on the command line): a dedicated IP, renaming, the offline cache location.
 
