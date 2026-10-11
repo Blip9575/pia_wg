@@ -151,6 +151,22 @@ return view.extend({
 			}
 		}
 
+		// the offline cache: servers list, verified meta servers, refresh job
+		const c = st.cache || {};
+		const when = c.checked || c.updated;
+		const cacheLine = [ E('span', c.regions
+			? _('%d regions, checked %s').format(c.regions, ago(when ? st.now - when : null))
+			: _('no servers list yet')) ];
+		const cacheWarn = [];
+		if (c.regions && when && st.now - when > 3 * 86400)
+			cacheWarn.push(_('the list has not been refreshed for over 3 days'));
+		if (c.ram)
+			cacheWarn.push(_('kept in RAM: lost at a reboot (the cache drive is not mounted)'));
+		if (!c.cron)
+			cacheWarn.push(_('no automatic refresh is installed'));
+		cacheLine.push(E('small', ' · ' + _('%d verified meta servers').format(c.meta || 0)
+			+ (c.dir ? ' · ' + c.dir : '') + (c.cron ? ' · ' + _('refreshed every 6 hours') : '')));
+
 		const save = () => {
 			const id = idIn.value.trim(), pw = pwIn.value;
 			if (!id || (!pw && !acc.password_set))
@@ -172,6 +188,9 @@ return view.extend({
 			field(_('Password'), pwIn),
 			E('div', { 'class': 'cbi-value' }, [ E('label', { 'class': 'cbi-value-title' }, _('Status')),
 				E('div', { 'class': 'cbi-value-field' }, status) ]),
+			E('div', { 'class': 'cbi-value' }, [ E('label', { 'class': 'cbi-value-title' }, _('Cache')),
+				E('div', { 'class': 'cbi-value-field' }, [ E('div', cacheLine) ].concat(cacheWarn.length
+					? [ E('div', { 'class': 'cbi-value-description', 'style': 'color:#d97706' }, '⚠ ' + cacheWarn.join('; ')) ] : [])) ]),
 			E('div', { 'class': 'cbi-page-actions' }, [
 				E('button', { 'class': 'cbi-button cbi-button-save', 'click': ui.createHandlerFn(this, save) }, _('Save and log in')),
 				' ',
@@ -304,7 +323,8 @@ return view.extend({
 		if (!this.tbody) return;
 		dom.content(this.tbody, this.renderRows());
 		// the account part is redrawn only when its state changed (not while typing)
-		const a = this.st.account, sig = [ a.id, a.password_set, a.vpn_expires ].join('|');
+		const a = this.st.account, c = this.st.cache || {},
+			sig = [ a.id, a.password_set, a.vpn_expires, c.regions, c.checked, c.updated, c.meta, c.ram, c.cron ].join('|');
 		if (this.accountBox && sig != this.accSig) {
 			this.accSig = sig;
 			dom.content(this.accountBox, this.renderAccount());
@@ -634,8 +654,8 @@ return view.extend({
 
 	render: function(st) {
 		this.st = st;
-		const a = st.account;
-		this.accSig = [ a.id, a.password_set, a.vpn_expires ].join('|');
+		const a = st.account, c = st.cache || {};
+		this.accSig = [ a.id, a.password_set, a.vpn_expires, c.regions, c.checked, c.updated, c.meta, c.ram, c.cron ].join('|');
 		this.accountBox = E('div', {}, [ this.renderAccount() ]);
 		const page = E('div', {}, [
 			E('h2', _('PIA VPN')),
