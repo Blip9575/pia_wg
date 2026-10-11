@@ -17,10 +17,10 @@ Changes compared to upstream 1.0.16:
   - `configure region`: regions needing the legacy token are marked `(L)`, a streaming optimised filter, default answers on every yes/no question
   - Configurable interface name, a run lock, temporary files in `/var/run/pia`, log in `/var/log/pia`
   - Fixes: server list error check, connectivity check on tunnels whose first hop does not answer, `jq` without regex support, `update` refusing anything that is not a valid script
-  - The WireGuard key pair and the server settings are kept in RAM only (like the official apps); the persistent network config is written only when it changes; `renew` (cron, ifup hook) replaces the watchdog for an ordinary `ifup`/`ifdown` managed interface, and the watchdog backs off after failed restarts
+  - The WireGuard key pair and the server settings are kept in RAM only (like the official apps), as deltas in `/var/state/network` that netifd's protocol scripts read and LuCI does not (no *unsaved changes*, nothing committed by a Save & Apply); the persistent network config is written only when it changes; `renew` (cron, ifup hook) replaces the watchdog for an ordinary `ifup`/`ifdown` managed interface, and the watchdog backs off after failed restarts
   - One config, `/etc/config/pia` (was `pia_wg`), with a section per interface named like it: several PIA interfaces on one router (`-i NAME`), sharing the account, tokens and cache; the script, cron tags, hook, log and cache directory use `pia` names (older names are converted on the first run)
   - AmneziaWG (PIA's obfuscated WireGuard, as in the Android app) is the default protocol of a new interface: `iface_proto`, asked right after the name, `configure protocol`; the servers list is the v7 one; also at interface creation: automatic protocol (AmneziaWG, then WireGuard), MACE DNS, small packets, fastest region of the country; a 401 is retried after 5/15/30 s before the VPN token is renewed
-  - A LuCI web interface (Services > PIA VPN, `luci install`): account, interfaces and a wizard to create them; the script gets JSON `api` commands for it (see *Web interface*)
+  - A LuCI web interface (Services > PIA VPN, `luci install`): account, interfaces and a wizard to create them; the script gets JSON `api` commands for it (see *Web interface*); a new region triggers a background check of its country's regions that need the legacy token (`cache probe CC`), and the interface is written the way LuCI saves it, so a save in the Network pages lists no changes
 
 ## Install
   - Connect to your OpenWrt router with SSH
