@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.25
+# Version: 1.0.26
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -35,7 +35,10 @@ PIACONF='/etc/config/pia' # one section per interface, named like it; the accoun
 RESERVED_NAMES=' account apitoken vpntoken cache log '
 PIA_DNS1='10.0.0.243' # PIA's DNS servers (what addKey returns)
 PIA_DNS2='10.0.0.242'
-PIA_KEEPALIVE=25 # the official apps' PersistentKeepalive
+PIA_MACE_DNS='10.0.0.241' # PIA DNS that also blocks ads, trackers and malware
+PIA_MTU_SMALL=1280        # the Android app's 'small packets' WireGuard MTU
+PIA_MTU_OVERHEAD=80       # WAN MTU minus this = PIA's standard (the desktop app, 1420 on 1500)
+PIA_KEEPALIVE=25          # the official apps' PersistentKeepalive
 # AmneziaWG obfuscation used when the server sends none (as the official app)
 PIA_AWG_DEFAULTS='jc=5 jmin=25 jmax=100 s1=5 s2=3 h1=1234567891 h2=1234567892 h3=1234567893 h4=1234567894'
 UCISTAGEDIR='/tmp/.uci'               # where uci keeps the RAM-staged (uncommitted) changes
@@ -750,8 +753,15 @@ select_region() {
     set pia.$PIAWG_IF.region_id="$PIAREGIONID"
     set pia.$PIAWG_IF.region_name="$PIAREGIONNAME"
     set pia.$PIAWG_IF.region_dns="$PIAREGIONDNS"
+    set pia.$PIAWG_IF.region_country="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .country")"
     commit pia
 EOI
+  # the fastest region of the country, picked at each start
+  uci -q delete "pia.$PIAWG_IF.region_fast"
+  if [ -z "$AUTO" ] && read_yn "Pick the fastest region of that country at each start" n; then
+    uci -q set "pia.$PIAWG_IF.region_fast=1"
+  fi
+  uci -q commit pia
   echo "Checking PIA meta servers…"
   if meta_refresh; then
     echo "Verified PIA meta servers cached: $METAN"
@@ -957,7 +967,7 @@ $(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
   KEYPATH='addKey'
   [ "$PIAPROTO" = 'amneziawg' ] && KEYPATH='add-awg-key'
   # one peer per token and server: keep off the servers of the other interfaces
-  SIBIPS="$(sibling_endpoints)"
+  SIBIPS="$(sibling_endpoints) $PIAEXCL"
   SERVERS="$(echo "$SERVERS" | awk -v u="$SIBIPS" 'BEGIN{n=split(u,a," ");for(i=1;i<=n;i++)x[a[i]]=1} !($1 in x)')"
   unset ADDKEYAUTHFAIL
   while read -r HOST CN MODE KPORT; do
@@ -1000,6 +1010,14 @@ pia_addkey_any() {
   if [ "$PIAAUTH" = 'vpn' ]; then
     pia_addkey && return 0
     [ "$ADDKEYAUTHFAIL" ] || return 1
+    # A refusal is often a burst that hits the whole region and passes: wait
+    # before blaming the token (renewing it does not help then)
+    for AKW in 5 15 30; do
+      echo "PIA refused the VPN token; trying again in ${AKW}s" >&3
+      sleep "$AKW"
+      pia_addkey && return 0
+      [ "$ADDKEYAUTHFAIL" ] || return 1
+    done
     VTS="$(uci -q get pia.vpntoken.timestamp)"
     if [ $(($(date +%s) - ${VTS:-0})) -gt 600 ]; then
       echo "PIA server refused the VPN token; renewing it" >&3
@@ -1095,6 +1113,12 @@ others_list() { iface_list | grep -vx "$PIAWG_IF"; }
 
 # set_default_route yes|no: all traffic through the interface, or only the
 # PIA DNS hosts (so that it can still be tested and used for DNS)
+# The DNS servers of the interface: its own (iface_dns) or PIA's
+dns_hosts() {
+  DHL="$(uci -q get "pia.$PIAWG_IF.iface_dns")"
+  echo "${DHL:-$PIA_DNS1 $PIA_DNS2}"
+}
+
 set_default_route() {
   uci -q delete "pia.$PIAWG_IF.peer_allowed_ips"
   if [ "$1" = 'yes' ]; then
@@ -1102,8 +1126,9 @@ set_default_route() {
     uci -q add_list "pia.$PIAWG_IF.peer_allowed_ips=::/0"
     uci -q set "pia.$PIAWG_IF.iface_defaultroute=1"
   else
-    uci -q add_list "pia.$PIAWG_IF.peer_allowed_ips=$PIA_DNS1/32"
-    uci -q add_list "pia.$PIAWG_IF.peer_allowed_ips=$PIA_DNS2/32"
+    for SDH in $(dns_hosts); do
+      uci -q add_list "pia.$PIAWG_IF.peer_allowed_ips=$SDH/32"
+    done
     uci -q set "pia.$PIAWG_IF.iface_defaultroute=0"
   fi
   uci -q set "pia.$PIAWG_IF.peer_route_allowed_ips=1"
@@ -1363,11 +1388,18 @@ iface_wizard() {
   uci -q get "pia.$PIAWG_IF.peer_allowed_ips" >/dev/null || WZNEW=1
   WZPROTO=''
   # a new interface: which protocol (AmneziaWG by default)
+  WZMODE=''
   [ -z "$WZNEW" ] || uci -q get "pia.$PIAWG_IF.iface_proto" >/dev/null || ask_protocol
   keep_conf_section 'net_interface' || set_defnetiface
+  if [ "$WZMODE" = 'auto' ]; then
+    uci -q set "pia.$PIAWG_IF.proto_mode=auto"
+    uci -q commit pia
+  fi
   keep_conf_section 'net_peer' || set_defnetpeer
   iface_defaults
   [ -z "$AUTO" ] || return 0
+  [ -z "$WZNEW" ] || ask_dns
+  [ -z "$WZNEW" ] || ask_mtu
   [ -z "$WZNEW" ] || ask_default_route
   if [ "$(uci -q get "pia.$PIAWG_IF.fw_asked")" != '1' ]; then
     ask_firewall
@@ -1503,6 +1535,7 @@ EOI
 # $WZPROTO. AmneziaWG is the PIA apps' option for networks that block WireGuard.
 ask_protocol() {
   WZPROTO=''
+  WZMODE=''
   if ! awg_available; then
     echo "AmneziaWG is not installed (packages amneziawg-tools, kmod-amneziawg, luci-proto-amneziawg): using WireGuard" >&3
     WZPROTO='wireguard'
@@ -1514,9 +1547,11 @@ ask_protocol() {
   }
   APDEF=1
   [ "$1" = 'wireguard' ] && APDEF=2
+  [ "$2" = 'auto' ] && APDEF=3
   echo "Protocol:"
   echo "  1) AmneziaWG   (obfuscated WireGuard, PIA's option for networks that block it)"
   echo "  2) WireGuard"
+  echo "  3) Automatic   (the one that works: the other is tried when there is no handshake)"
   while :; do
     printf "Select the protocol (press enter for %s): " "$APDEF"
     read -r APR || APR=''
@@ -1524,6 +1559,10 @@ ask_protocol() {
     case "$APR" in
     1) WZPROTO='amneziawg' ;;
     2) WZPROTO='wireguard' ;;
+    3)
+      WZPROTO="${1:-amneziawg}"
+      WZMODE='auto'
+      ;;
     *)
       echo "Invalid choice: '$APR'"
       continue
@@ -1533,29 +1572,117 @@ ask_protocol() {
   done
 }
 
-# Change the protocol of the interface being handled: its network sections and
+# Switch the interface being handled to protocol $1: its network sections and
 # session are dropped (made again at the next start)
+switch_proto() {
+  ifdown "$PIAWG_IF" >/dev/null 2>&1
+  forget_net
+  rm -f "$SESSION"
+  uci -q set "pia.$PIAWG_IF.iface_proto=$1"
+  uci -q commit pia
+  set_ifvars
+}
+
+# The protocol mode: automatic (proto_mode 'auto') or the fixed iface_proto
+proto_is_auto() { [ "$(uci -q get "pia.$1.proto_mode")" = 'auto' ]; }
+
+# Change the protocol of the interface being handled
 set_protocol() {
   iface_exists "$PIAWG_IF" || {
     echo "No interface named '$PIAWG_IF' is configured!" >&2
     return 1
   }
-  ask_protocol "$PIAPROTO"
-  if [ "$WZPROTO" = "$PIAPROTO" ]; then
-    echo "$PIAWG_IF already uses $PIAPROTO"
-    return 0
-  fi
+  SPMODE=''
+  proto_is_auto "$PIAWG_IF" && SPMODE='auto'
+  ask_protocol "$PIAPROTO" "$SPMODE"
   if [ "$WZPROTO" = 'amneziawg' ] && uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null; then
     echo "A dedicated IP needs WireGuard; remove its token first" >&2
     return 1
   fi
-  ifdown "$PIAWG_IF" >/dev/null 2>&1
-  forget_net
-  rm -f "$SESSION"
-  uci -q set "pia.$PIAWG_IF.iface_proto=$WZPROTO"
+  if [ "$WZMODE" = 'auto' ]; then
+    uci -q set "pia.$PIAWG_IF.proto_mode=auto"
+  else
+    uci -q delete "pia.$PIAWG_IF.proto_mode"
+  fi
   uci -q commit pia
-  set_ifvars
-  echo "Interface $PIAWG_IF now uses $PIAPROTO: start it again (its region needs $PIAPROTO servers)"
+  if [ "$WZPROTO" = "$PIAPROTO" ]; then
+    echo "$PIAWG_IF uses ${WZMODE:+automatic selection, now }$PIAPROTO"
+    return 0
+  fi
+  switch_proto "$WZPROTO"
+  echo "Interface $PIAWG_IF now uses ${WZMODE:+automatic selection, now }$PIAPROTO: start it again (its region needs $PIAPROTO servers)"
+}
+
+# DNS servers: PIA's standard ones or MACE (also blocks ads, trackers, malware)
+ask_dns() {
+  [ -z "$AUTO" ] || return 0
+  ADDEF=1
+  [ "$(uci -q get "pia.$PIAWG_IF.iface_dns")" = "$PIA_MACE_DNS" ] && ADDEF=2
+  echo "DNS servers:"
+  echo "  1) PIA standard"
+  echo "  2) PIA with MACE (blocks ads, trackers and malware)"
+  while :; do
+    printf "Select the DNS servers (press enter for %s): " "$ADDEF"
+    read -r ADR || ADR=''
+    [ -n "$ADR" ] || ADR="$ADDEF"
+    case "$ADR" in
+    1)
+      uci -q delete "pia.$PIAWG_IF.iface_dns"
+      break
+      ;;
+    2)
+      uci -q set "pia.$PIAWG_IF.iface_dns=$PIA_MACE_DNS"
+      break
+      ;;
+    *) echo "Invalid choice: '$ADR'" ;;
+    esac
+  done
+  uci -q commit pia
+  # without the default route only the DNS hosts are routed to the tunnel
+  has_default_route "$PIAWG_IF" || set_default_route no
+}
+
+# The tunnel MTU PIA's apps use: the WAN's minus 80 (1420 on 1500)
+std_mtu() {
+  pia_wan
+  SMD="$WANDEV"
+  [ -n "$SMD" ] || SMD="$(ip -4 route show default | awk -v t="$PIAIFS" '{for(i=1;i<NF;i++) if($i=="dev" && index(t, " " $(i+1) " ") == 0){print $(i+1); exit}}')"
+  SMM="$(cat "/sys/class/net/$SMD/mtu" 2>/dev/null)"
+  case "$SMM" in
+  '' | *[!0-9]*) SMM=1500 ;;
+  esac
+  [ "$SMM" -le 1500 ] || SMM=1500
+  echo $((SMM - PIA_MTU_OVERHEAD))
+}
+
+# Packet size: PIA's standard one or the small one
+ask_mtu() {
+  [ -z "$AUTO" ] || return 0
+  AMSTD="$(std_mtu)"
+  AMCUR="$(uci -q get "pia.$PIAWG_IF.iface_mtu")"
+  AMDEF=1
+  [ -n "$AMCUR" ] && [ "$AMCUR" -le "$PIA_MTU_SMALL" ] && AMDEF=2
+  echo "Packet size (MTU):"
+  echo "  1) Standard ($AMSTD, PIA's)"
+  echo "  2) Small ($PIA_MTU_SMALL, for networks that drop or fragment large packets)"
+  [ -z "$AMCUR" ] || echo "  (now $AMCUR)"
+  while :; do
+    printf "Select the packet size (press enter for %s): " "$AMDEF"
+    read -r AMR || AMR=''
+    [ -n "$AMR" ] || AMR="$AMDEF"
+    case "$AMR" in
+    1)
+      uci -q set "pia.$PIAWG_IF.iface_mtu=$AMSTD"
+      break
+      ;;
+    2)
+      uci -q set "pia.$PIAWG_IF.iface_mtu=$PIA_MTU_SMALL"
+      break
+      ;;
+    *) echo "Invalid choice: '$AMR'" ;;
+    esac
+  done
+  uci -q commit pia
 }
 
 # ---- Session (RAM only), like the official apps ----
@@ -2049,12 +2176,60 @@ endpoint_route() {
   [ "$ERD" != "$PIAWG_IF" ]
 }
 
-start_wgpia() {
-  stop_wgpia
+# Fastest region of the country of the configured one: ICMP echoes from the
+# WAN (what PIA's apps measure), in parallel. The region is only written when
+# it changes.
+fast_region() {
+  [ "$(uci -q get "pia.$PIAWG_IF.region_fast")" = '1' ] || return 0
+  uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null && return 0
+  FRC="$(uci -q get "pia.$PIAWG_IF.region_country")"
+  [ -n "$FRC" ] || return 0
+  pia_wan
+  FRN=0
+  FRPIDS=''
+  # the same kind of region as the chosen one (streaming optimised, geo, port forward)
+  FRL="$(jq -r --arg c "$FRC" --arg g "$SRVGRP" --arg me "$(uci -q get "pia.$PIAWG_IF.region_id")" '
+    def kind: [((.name | contains("Streaming")) or (.dns | contains("-so."))), .geo, .port_forward];
+    (.regions[] | select(.id == $me) | kind) as $k
+    | .regions[] | select(.country == $c and .offline == false and kind == $k) | select(.servers[$g])
+    | "\(.id) \(.servers[$g][0].ip)"' "$(cache_dir)/servers.json" 2>/dev/null)"
+  [ -n "$FRL" ] || return 0
+  while read -r FRID FRIP; do
+    FRN=$((FRN + 1))
+    (ping -c 2 -W 1 ${WANDEV:+-I "$WANDEV"} "$FRIP" 2>/dev/null | awk -F/ -v id="$FRID" '/^round-trip/{print $4, id}' >"$RUNDIR/fast.$$.$FRN") &
+    FRPIDS="$FRPIDS $!"
+  done <<EOF
+$FRL
+EOF
+  # (not a plain wait: the log writer is a child too)
+  # shellcheck disable=SC2086
+  wait $FRPIDS
+  FRBEST="$(cat "$RUNDIR"/fast.$$.* 2>/dev/null | sort -n | head -n 1)"
+  rm -f "$RUNDIR"/fast.$$.*
+  [ -n "$FRBEST" ] || {
+    echo "Fastest region: no answer to the pings; keeping $(uci -q get "pia.$PIAWG_IF.region_id")" >&3
+    return 0
+  }
+  FRID="${FRBEST#* }"
+  echo "Fastest region of $FRC: $FRID (${FRBEST%% *} ms)" >&3
+  [ "$FRID" = "$(uci -q get "pia.$PIAWG_IF.region_id")" ] && return 0
+  FRNAME="$(jq -r --arg r "$FRID" '.regions[] | select(.id == $r) | .name' "$(cache_dir)/servers.json")"
+  FRDNS="$(jq -r --arg r "$FRID" '.regions[] | select(.id == $r) | .dns' "$(cache_dir)/servers.json")"
+  uci -q batch <<EOI >/dev/null
+    set pia.$PIAWG_IF.region_id="$FRID"
+    set pia.$PIAWG_IF.region_name="$FRNAME"
+    set pia.$PIAWG_IF.region_dns="$FRDNS"
+    commit pia
+EOI
+}
+
+# One attempt: register a new key, bring the interface up, wait for the
+# handshake (the caller checks the result)
+start_try() {
   # a new key pair for each connection, as the official apps do
   NEWKEY=1
   set_netconf || {
-    echo "Could not start PIA!" >&3
+    NEWKEY=''
     return 1
   }
   NEWKEY=''
@@ -2063,12 +2238,63 @@ start_wgpia() {
   endpoint_route "$(uci -q get "network.$PIAWG_PEER.endpoint_host")" pin
   ifup "$PIAWG_IF"
   sleep 1
-  # The handshake can take a few seconds; check quietly before reporting
   N=0
+  if [ "$1" = 'fast' ]; then
+    # (the automatic mode: just the handshake, for up to 12 seconds)
+    while [ $N -lt 12 ] && ! handshake_age >/dev/null; do
+      N=$((N + 1))
+      sleep 1
+    done
+    return 0
+  fi
+  # The handshake can take a few seconds; check quietly before reporting
   while [ $N -lt 5 ] && ! check_wg >/dev/null 2>&1 3>/dev/null; do
     N=$((N + 1))
     sleep 2
   done
+  return 0
+}
+
+# Automatic protocol: the interface's protocol first (the one that worked last,
+# it is kept), and on no handshake a second server, then the other protocol
+auto_start() {
+  APALT='amneziawg'
+  [ "$PIAPROTO" = 'wireguard' ] || APALT='wireguard'
+  AFIRST="$PIAPROTO"
+  PIAEXCL=''
+  for AP in "$AFIRST" "$APALT"; do
+    [ "$AP" = 'amneziawg' ] && ! awg_available && continue
+    if [ "$AP" != "$PIAPROTO" ]; then
+      echo "No handshake: trying $AP" >&3
+      switch_proto "$AP"
+    fi
+    # shellcheck disable=SC2034 # twice: the second time on another server
+    for AT in 1 2; do
+      if start_try fast && handshake_age >/dev/null && check_wg >/dev/null 2>&1 3>/dev/null; then
+        PIAEXCL=''
+        return 0
+      fi
+      # a server that registered us but never answered: not that one again
+      PIAEXCL="$PIAEXCL $(session_get server_ip)"
+      ifdown "$PIAWG_IF" >/dev/null 2>&1
+      [ -n "$(session_get server_ip)" ] && ip route del "$(session_get server_ip)/32" 2>/dev/null
+    done
+    PIAEXCL=''
+  done
+  return 1
+}
+
+start_wgpia() {
+  stop_wgpia
+  fast_region
+  if proto_is_auto "$PIAWG_IF"; then
+    auto_start
+  else
+    start_try || {
+      echo "Could not start PIA!" >&3
+      return 1
+    }
+  fi
   check_wg
   RET=$?
   [ $RET -eq 0 ] && echo "PIA started successfully ..." >&3 || echo "Could not start PIA!" >&3
@@ -2362,7 +2588,9 @@ print_usage() {
   echo "    - configure region   : set/choose PIA region"
   echo "    - configure keys     : (the keys are kept in RAM only; nothing to configure)"
   echo "    - configure interface [name] : create an interface (a section of /etc/config/pia)"
-  echo "    - configure protocol : AmneziaWG or WireGuard for the interface (asked when it is created)"
+  echo "    - configure protocol : AmneziaWG, WireGuard or automatic for the interface (asked when it is created)"
+  echo "    - configure dns      : PIA standard DNS or MACE (asked when the interface is created)"
+  echo "    - configure mtu      : standard or small packet size (asked when the interface is created)"
   echo "    - configure rename <name>    : rename the interface (-i old)"
   echo "    - configure remove <name>    : forget an interface (config, network sections, cron)"
   echo "    - configure cache    : set offline cache directory and options"
@@ -2554,6 +2782,14 @@ case "$1" in
     iface_wizard
     ;;
   'rename') rename_iface "$3" ;;
+  'dns')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
+    ask_dns
+    ;;
+  'mtu')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
+    ask_mtu
+    ;;
   'protocol')
     iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
     set_protocol
