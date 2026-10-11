@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.19
+# Version: 1.0.20
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1265,6 +1265,11 @@ migrate_config() {
   # keep the old file unless the new one has what matters
   if [ "$(uci -q get pia.account.id)" = "$(uci -q get pia_wg.@user[0].id)" ] && iface_exists "$MIGIF"; then
     rm -f "$OLDCONF"
+    # the peer used to be one constant section name; it is wgpeer_<interface> now
+    if [ "$(uci -q get network.wgpeer_pia)" = "wireguard_$MIGIF" ]; then
+      uci -q delete network.wgpeer_pia
+      uci -q commit network
+    fi
     echo "Configuration moved from $OLDCONF to $PIACONF (interface $MIGIF)"
   else
     echo "Could not convert $OLDCONF; it was left in place" >&2
