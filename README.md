@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.3.0 (upstream 1.0.16)
+1.3.1 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -81,7 +81,7 @@ Then, next time you use `./pia_wg.sh start` (if not already started, otherwise y
 
 `./pia_wg.sh configure region` lets you type a region ID, or pick from a numbered list that can be narrowed with yes/no questions. Pressing enter gives the default, which is shown in capitals, e.g. `(y/N)`:
   - `Port forward only servers? (y/N)`: only regions supporting port forwarding
-  - `Geo only servers? (y/N)`: only regions with geo-located servers
+  - `Non geo-located only servers? (Y/n)`: leave out the regions whose servers are geo-located (the default; n shows them too)
   - `Stream optimised only servers? (y/N)`: only the streaming optimised regions (those with "Streaming" in their name; their ids do not all end in `-so`, e.g. `uk_2`)
 
 The answers are combined; if no region matches, the questions are asked again. The same convention applies to the other yes/no questions of the script (for example, answering the "Keep this configuration" question with enter keeps it).
