@@ -631,7 +631,7 @@ return view.extend({
 				field(_('Packet size (MTU)'), mtuBox, mtuCtl.help),
 				field(_('Keepalive'), keepBox, keepCtl.help),
 				field(_('DNS servers'), dnsBox, dnsCtl.help),
-				field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : _('Recommended to send all traffic via PIA.')),
+				field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : [ E('div', _('Recommended to send all traffic via PIA.')), E('div', _('Enables strict DNS to prevent DNS leakage')) ]),
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('The zones whose traffic may go through this VPN.')),
