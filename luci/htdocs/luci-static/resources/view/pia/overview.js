@@ -442,11 +442,11 @@ return view.extend({
 			fill();
 			dom.content(box, [
 				field(_('Exclude virtual VPN locations'), ng, _('List physical VPN locations only.')),
-				field(_('VPN location'), countrySel, _('Location of VPN endpoint')),
 				field(_('Streaming optimised only'), so, _('List streaming optimised regions only')),
 				field(_('Port forwarding only'), pf, _('List port forwarding regions only')),
+				field(_('VPN location'), countrySel, _('Location of VPN endpoint')),
 				field(_('Fastest region'), fastCb, _('Automatically choose fastest region in selected country')),
-				field(_('Region Selection'), regionSel)
+				field(_('Region Selection'), regionSel, _('Choose region for VPN endpoint'))
 			]);
 		};
 
