@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.5.0
+# Version: 1.5.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2913,9 +2913,15 @@ api_status() {
   AMETA="$(grep -c . "$ACD/meta.list" 2>/dev/null)"
   AAWG=0
   awg_available && AAWG=1
+  # dnsmasq instances still without strict-order (those using only their own servers are skipped)
+  ASTRICT=1
+  for DSX in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p'); do
+    [ "$(uci -q get "dhcp.$DSX.noresolv")" = '1' ] && continue
+    [ "$(uci -q get "dhcp.$DSX.strictorder")" = '1' ] || ASTRICT=0
+  done
   {
     for AX in $(iface_list); do api_iface_json "$AX"; done
-  } | jq -sc --arg version "$CURVERS" --argjson awg "$AAWG" \
+  } | jq -sc --arg version "$CURVERS" --argjson awg "$AAWG" --argjson strict "$ASTRICT" \
     --arg id "$(uci -q get pia.account.id)" --arg pw "$(uci -q get pia.account.password)" \
     --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
     --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg stdmtu "$(std_mtu)" \
@@ -2924,7 +2930,7 @@ api_status() {
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
     --arg cdir "$ACD" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
     --argjson job "$(api_job_json _global)" --argjson probe "$(api_job_json _probe)" \
-    '{version: $version, awg: ($awg == 1),
+    '{version: $version, awg: ($awg == 1), strict_dns: ($strict == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
       zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan,
       std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), optimal_mtu: ($optimal | tonumber),
