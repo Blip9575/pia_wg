@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.0.45
+# Version: 1.0.46
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1711,8 +1711,8 @@ ask_dns() {
   ADDEF=1
   dns_mace && ADDEF=2
   echo "DNS servers (the streaming optimised regions have their own: $PIA_DNS_SO, $PIA_DNS_SO_MACE with MACE):"
-  echo "  1) PIA standard ($PIA_DNS)"
-  echo "  2) PIA with MACE ($PIA_DNS_MACE; blocks ads, trackers and malware)"
+  echo "  1) Default ($PIA_DNS): recommended for PIA"
+  echo "  2) MACE ($PIA_DNS_MACE; blocks ads, trackers and malware)"
   while :; do
     printf "Select the DNS servers (press enter for %s): " "$ADDEF"
     read -r ADR || ADR=''
@@ -1756,7 +1756,7 @@ ask_mtu() {
   [ -n "$AMCUR" ] && [ "$AMCUR" -eq "$PIA_MTU_OPTIMAL" ] && AMDEF=2
   [ -n "$AMCUR" ] && [ "$AMCUR" -le "$PIA_MTU_SMALL" ] && AMDEF=3
   echo "Packet size (MTU):"
-  echo "  1) Standard ($AMSTD): recommended for IPv4 + IPv6 traffic"
+  echo "  1) Default ($AMSTD): recommended for IPv4 + IPv6 traffic"
   echo "  2) Optimal ($PIA_MTU_OPTIMAL): IPv4 only via WAN 1500 or PPPoE 1508"
   echo "  3) Small ($PIA_MTU_SMALL): improve compatibility for mobile networks"
   [ -z "$AMCUR" ] || echo "  (now $AMCUR)"
@@ -2786,8 +2786,8 @@ print_usage() {
   echo "    - configure keys     : (the keys are kept in RAM only; nothing to configure)"
   echo "    - configure interface [name] : create an interface (a section of /etc/config/pia)"
   echo "    - configure protocol : AmneziaWG, WireGuard or automatic for the interface (asked when it is created)"
-  echo "    - configure dns      : PIA standard DNS or MACE (asked when the interface is created)"
-  echo "    - configure mtu      : standard or small packet size (asked when the interface is created)"
+  echo "    - configure dns      : default PIA DNS or MACE (asked when the interface is created)"
+  echo "    - configure mtu      : default, optimal or small packet size (asked when the interface is created)"
   echo "    - configure rename <name>    : rename the interface (-i old)"
   echo "    - configure remove <name>    : forget an interface (config, network sections, cron)"
   echo "    - configure cache    : set offline cache directory and options"

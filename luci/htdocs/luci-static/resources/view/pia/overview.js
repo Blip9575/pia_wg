@@ -99,14 +99,14 @@ function fail(res) {
 
 // the PIA DNS server of a MACE choice and a streaming optimised region (as pia.sh does)
 const DNSOPTS = [
-	[ 'standard', _('PIA standard'), _('Standard DNS server for PIA') ],
-	[ 'mace', _('PIA with MACE'), _('Blocks ads, trackers and malware') ]
+	[ 'standard', _('Default'), _('Recommended for PIA.') ],
+	[ 'mace', _('MACE'), _('Blocks ads, trackers and malware') ]
 ];
 
 // the packet sizes: standard follows the WAN (st.std_mtu), the others are fixed
 function mtuOpts(st) {
 	return [
-		[ 'std', _('Standard (%d)').format(st.std_mtu), _('Recommended for IPv4 + IPv6 traffic') ],
+		[ 'std', _('Default (%d)').format(st.std_mtu), _('Recommended for IPv4 + IPv6 traffic') ],
 		[ 'optimal', _('Optimal (%d)').format((st.optimal_mtu || 1440)), _('IPv4 only via WAN 1500 or PPPoE 1508.') ],
 		[ 'small', _('Small (%d)').format(st.small_mtu), _('Improve compatibility for mobile networks') ]
 	];
@@ -444,7 +444,7 @@ return view.extend({
 				field(_('Country'), countrySel),
 				field(_('Streaming optimised only'), so),
 				field(_('Port forwarding only'), pf),
-				field(_('Non geo-located server'), ng),
+				field(_('Exclude geo-located regions'), ng),
 				field(_('Fastest region'), fastCb, _('Automatically choose fastest in selected country')),
 				field(_('Region Selection'), regionSel)
 			]);
@@ -574,13 +574,13 @@ return view.extend({
 			[
 				field(_('Protocol Selection'), protoSel, protoCtl.help),
 				regionBox,
-				field(_('DNS servers'), dnsCtl.node, dnsCtl.help),
 				field(_('Packet size (MTU)'), mtuCtl.node, mtuCtl.help),
+				field(_('PIA DNS servers'), dnsCtl.node, dnsCtl.help),
+				field(_('Enable PIA DNS Server'), strictCb, _('Recommended to prevent DNS leakage')),
 				field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : _('Recommended to send all traffic via PIA.')),
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('The zones whose traffic may go through this VPN.')),
-				field(_('PIA DNS Server'), strictCb, _('Recommended to prevent DNS leakage')),
 				err,
 				E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ' ].concat(buttons))
 			]));
