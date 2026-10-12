@@ -24,12 +24,11 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, mtu: 1, route: 1, firewall: 1, forward: 1, strict: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1 }
 });
-function callSave(...a) {
-	const keys = [ 'name', 'proto', 'region', 'fast', 'dns', 'mtu', 'route', 'firewall', 'forward', 'strict' ];
+function callSave(args) {
 	const o = {};
-	keys.forEach((k, n) => { if (a[n] != null) o[k] = a[n]; });
+	Object.keys(args).forEach(k => { if (args[k] != null) o[k] = args[k]; });
 	return callSaveObj(o);
 }
 const callRemove = rpc.declare({ object: 'luci.pia', method: 'remove', params: [ 'name' ] });
@@ -99,16 +98,44 @@ function fail(res) {
 
 // the PIA DNS server of a MACE choice and a streaming optimised region (as pia.sh does)
 const DNSOPTS = [
-	[ 'standard', _('Default'), _('Recommended for PIA.') ],
-	[ 'mace', _('MACE'), _('Blocks ads, trackers and malware') ]
+	[ 'standard', _('PIA'), _('Recommended for PIA.') ],
+	[ 'mace', _('PIA with MACE'), _('Blocks ads, trackers and malware') ],
+	[ 'custom', _('Custom'), _('A DNS server of your own, reached through the tunnel instead of PIA\'s.') ]
 ];
+
+const MTU_MIN = 1280, MTU_MAX = 1440, KEEPALIVE = 25;
+const KEEPOPTS = [
+	[ 'default', _('Default (%d)').format(KEEPALIVE), _('The value of the official PIA apps.') ],
+	[ 'off', _('Disabled (0)'), _('No keepalive packets: a NAT or firewall in between may drop the idle tunnel.') ],
+	[ 'custom', _('Custom'), _('Seconds between keepalive packets (1 to 65535).') ]
+];
+
+// a number-only input: digits are all it takes; ok() tells if the value is in range
+function numInput(value, placeholder) {
+	const inp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'inputmode': 'numeric', 'pattern': '[0-9]*',
+		'maxlength': 5, 'size': 8, 'value': value != null ? String(value) : '', 'placeholder': placeholder || '', 'style': 'margin-top:.4em' });
+	inp.addEventListener('input', () => { inp.value = inp.value.replace(/[^0-9]/g, ''); });
+	return inp;
+}
+
+const IPV4 = /^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$/;
+
+// a select with an extra input shown for its 'custom' choice
+function withInput(ctl, input) {
+	const box = E('div', [ ctl.node, input ]);
+	const sync = () => { input.style.display = ctl.node.value == 'custom' ? '' : 'none'; };
+	ctl.node.addEventListener('change', sync);
+	sync();
+	return box;
+}
 
 // the packet sizes: standard follows the WAN (st.std_mtu), the others are fixed
 function mtuOpts(st) {
 	return [
 		[ 'std', _('Default (%d)').format(st.std_mtu), _('Recommended for IPv4 + IPv6 traffic') ],
 		[ 'optimal', _('Optimal (%d)').format((st.optimal_mtu || 1440)), _('IPv4 only via WAN 1500 or PPPoE 1508.') ],
-		[ 'small', _('Small (%d)').format(st.small_mtu), _('Improve compatibility for mobile networks') ]
+		[ 'small', _('Small (%d)').format(st.small_mtu), _('Improve compatibility for mobile networks') ],
+		[ 'custom', _('Custom'), _('%d to %d').format(MTU_MIN, MTU_MAX) ]
 	];
 }
 
@@ -284,6 +311,7 @@ return view.extend({
 		const parts = [];
 		parts.push(dnsLabel(this.st, i.dns_ip));
 		parts.push(_('MTU %s').format(i.mtu || _('default')));
+		if (i.keepalive != null && i.keepalive != KEEPALIVE) parts.push(i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive'));
 		parts.push(i.default_route ? _('default route') : _('no default route'));
 		if (i.firewall) parts.push(_('zone %s').format(i.name) + (i.forward.length ? ' ← ' + i.forward.join(', ') : ''));
 		if (i.dip) parts.push(_('dedicated IP'));
@@ -495,10 +523,20 @@ return view.extend({
 			'maxlength': 15, 'placeholder': 'pia', 'spellcheck': 'false' });
 		const nameOk = n => /^[A-Za-z0-9_]{1,15}$/.test(n) && [ 'account', 'apitoken', 'vpntoken', 'cache', 'log' ].indexOf(n) < 0;
 
-		const dnsCtl = selectHelp(DNSOPTS, adding || i.dns != 'mace' ? 'standard' : 'mace');
+		const dnsCtl = selectHelp(DNSOPTS, adding ? 'standard' : i.dns);
+		const dnsInp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'maxlength': 15, 'size': 16, 'spellcheck': 'false',
+			'placeholder': _('IPv4 address'), 'value': !adding && i.dns == 'custom' ? i.dns_ip : '', 'style': 'margin-top:.4em' });
+		const dnsBox = withInput(dnsCtl, dnsInp);
 		const cur = adding ? 0 : i.mtu;
-		const custom = (cur && cur != st.std_mtu && cur != (st.optimal_mtu || 1440) && cur != st.small_mtu) ? [ [ String(cur), _('Custom (%d)').format(cur), '' ] ] : [];
-		const mtuCtl = selectHelp(mtuOpts(st).concat(custom), !cur || cur == st.std_mtu ? 'std' : cur == (st.optimal_mtu || 1440) ? 'optimal' : cur == st.small_mtu ? 'small' : String(cur));
+		const optimal = st.optimal_mtu || MTU_MAX;
+		const isCustom = cur && cur != st.std_mtu && cur != optimal && cur != st.small_mtu;
+		const mtuCtl = selectHelp(mtuOpts(st), !cur || cur == st.std_mtu ? 'std' : cur == optimal ? 'optimal' : cur == st.small_mtu ? 'small' : 'custom');
+		const mtuInp = numInput(isCustom ? cur : '', _('%d to %d').format(MTU_MIN, MTU_MAX));
+		const mtuBox = withInput(mtuCtl, mtuInp);
+		const ka = adding || i.keepalive == null || i.keepalive == KEEPALIVE ? 'default' : i.keepalive == 0 ? 'off' : 'custom';
+		const keepCtl = selectHelp(KEEPOPTS, ka);
+		const keepInp = numInput(ka == 'custom' ? i.keepalive : '', _('1 to 65535'));
+		const keepBox = withInput(keepCtl, keepInp);
 
 		const routeCb = checkbox(adding ? !holder : i.default_route);
 		if (holder) {
@@ -509,12 +547,6 @@ return view.extend({
 		const zones = st.zones.filter(z => (adding || z != i.name) && !/^Block-/.test(z));
 		const fwd = adding ? (st.lan_zone ? [ st.lan_zone ] : []) : i.forward;
 		const boxes = zones.map(z => [ z, checkbox(fwd.indexOf(z) >= 0) ]);
-		// strict order is a setting of dnsmasq, set here but never cleared here
-		const strictCb = checkbox(adding ? true : !!st.strict_dns);
-		if (st.strict_dns) {
-			strictCb.checked = true;
-			strictCb.disabled = true;
-		}
 
 		const regionBox = E('div');
 		let picker = null;
@@ -542,12 +574,30 @@ return view.extend({
 				if (others.some(o => o.name == name)) return problem(_('An interface with that name exists'));
 			}
 			if (picker && !g.region) return problem(_('Choose a region'));
+			if (mtuCtl.node.value == 'custom') {
+				const m = +mtuInp.value;
+				if (!/^[0-9]+$/.test(mtuInp.value) || m < MTU_MIN || m > MTU_MAX)
+					return problem(_('Packet size: digits only, %d to %d').format(MTU_MIN, MTU_MAX));
+			}
+			if (keepCtl.node.value == 'custom') {
+				const k = +keepInp.value;
+				if (!/^[0-9]+$/.test(keepInp.value) || k < 1 || k > 65535)
+					return problem(_('Keepalive: digits only, 1 to 65535'));
+			}
+			if (dnsCtl.node.value == 'custom' && !IPV4.test(dnsInp.value.trim()))
+				return problem(_('DNS server: enter an IPv4 address'));
 			const title = adding ? _('Add interface') : _('Saving %s').format(name);
 			ui.showModal(title, E('p', { 'class': 'spinning' }, adding ? _('Creating the interface…') : _('Saving…')));
-			return callSave(name, protoSel.value, g ? g.region : null, g ? (g.fast ? '1' : '0') : null, dnsCtl.node.value, mtuCtl.node.value,
-				routeCb.disabled ? null : (routeCb.checked ? 'yes' : 'no'), fwCb.checked ? 'yes' : 'no',
-				fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
-				strictCb.disabled ? null : (strictCb.checked ? 'yes' : 'no')).then(r => {
+			return callSave({
+				name: name, proto: protoSel.value,
+				region: g ? g.region : null, fast: g ? (g.fast ? '1' : '0') : null,
+				dns: dnsCtl.node.value, dns_ip: dnsCtl.node.value == 'custom' ? dnsInp.value.trim() : null,
+				mtu: mtuCtl.node.value == 'custom' ? mtuInp.value : mtuCtl.node.value,
+				keepalive: keepCtl.node.value == 'custom' ? keepInp.value : keepCtl.node.value,
+				route: routeCb.disabled ? null : (routeCb.checked ? 'yes' : 'no'),
+				firewall: fwCb.checked ? 'yes' : 'no',
+				forward: fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null
+			}).then(r => {
 				ui.hideModal();
 				if (!r || !r.ok) return fail(r);
 				this.refresh();
@@ -578,9 +628,9 @@ return view.extend({
 			[
 				field(_('Protocol Selection'), protoSel, protoCtl.help),
 				regionBox,
-				field(_('Packet size (MTU)'), mtuCtl.node, mtuCtl.help),
-				field(_('PIA DNS servers'), dnsCtl.node, dnsCtl.help),
-				field(_('Enable PIA DNS Server'), strictCb, _('Recommended to prevent DNS leakage')),
+				field(_('Packet size (MTU)'), mtuBox, mtuCtl.help),
+				field(_('Keepalive'), keepBox, keepCtl.help),
+				field(_('DNS servers'), dnsBox, dnsCtl.help),
 				field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : _('Recommended to send all traffic via PIA.')),
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
