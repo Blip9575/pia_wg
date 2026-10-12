@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.5.5
+# Version: 1.6.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -45,6 +45,7 @@ PIA_MTU_SMALL=1280   # the Android app's 'small packets' WireGuard MTU
 PIA_MTU_OPTIMAL=1440 # IPv4 only: 1500 minus the 60 bytes of IPv4 + WireGuard (a WAN of 1500, or PPPoE with 1508)
 PIA_MTU_OVERHEAD=80  # WAN MTU minus this = PIA's standard (the desktop app, 1420 on 1500)
 PIA_KEEPALIVE=25     # the official apps' PersistentKeepalive
+PIA_MTU_MIN=1280     # custom packet size: IPv6 needs 1280
 # AmneziaWG obfuscation used when the server sends none (as the official app)
 PIA_AWG_DEFAULTS='jc=5 jmin=25 jmax=100 s1=5 s2=3 h1=1234567891 h2=1234567892 h3=1234567893 h4=1234567894'
 UCISTAGEDIR='/tmp/.uci'               # where uci keeps the RAM-staged (uncommitted) changes
@@ -1162,6 +1163,15 @@ dns_mace() {
     [ "$(uci -q get "pia.$PIAWG_IF.iface_dns")" = "$PIA_DNS_SO_MACE" ]
 }
 
+# Does the interface use a DNS server of its own (iface_dns, not one of PIA's)?
+dns_custom() {
+  DCC="$(uci -q get "pia.$PIAWG_IF.iface_dns")"
+  case "$DCC" in
+  '' | "$PIA_DNS" | "$PIA_DNS_SO" | "$PIA_DNS_MACE" | "$PIA_DNS_SO_MACE") return 1 ;;
+  esac
+  return 0
+}
+
 # The PIA DNS server the interface should use: by its region (streaming
 # optimised: '-so.' in its DNS name) and by MACE
 dns_wanted() {
@@ -1485,6 +1495,7 @@ iface_wizard() {
   [ -z "$AUTO" ] || return 0
   [ -z "$WZNEW" ] || ask_dns
   [ -z "$WZNEW" ] || ask_mtu
+  [ -z "$WZNEW" ] || ask_keepalive
   [ -z "$WZNEW" ] || ask_default_route
   if [ "$(uci -q get "pia.$PIAWG_IF.fw_asked")" != '1' ]; then
     ask_firewall
@@ -1705,33 +1716,44 @@ set_protocol() {
   echo "Interface $PIAWG_IF now uses ${WZMODE:+automatic selection, now }$PIAPROTO: start it again (its region needs $PIAPROTO servers)"
 }
 
-# DNS servers: PIA's or MACE (also blocks ads, trackers and malware). The
-# address follows from that and the region (streaming optimised or not).
+# DNS servers: PIA's, PIA with MACE (also blocks ads, trackers and malware) or
+# one of your own. The PIA address follows from that and the region
+# (streaming optimised or not).
 ask_dns() {
   [ -z "$AUTO" ] || return 0
   ADDEF=1
   dns_mace && ADDEF=2
+  dns_custom && ADDEF=3
   echo "DNS servers (the streaming optimised regions have their own: $PIA_DNS_SO, $PIA_DNS_SO_MACE with MACE):"
-  echo "  1) Default ($PIA_DNS): recommended for PIA"
-  echo "  2) MACE ($PIA_DNS_MACE; blocks ads, trackers and malware)"
+  echo "  1) PIA ($PIA_DNS): recommended for PIA"
+  echo "  2) PIA with MACE ($PIA_DNS_MACE; blocks ads, trackers and malware)"
+  echo "  3) Custom: a DNS server of your own (reached through the tunnel)"
   while :; do
     printf "Select the DNS servers (press enter for %s): " "$ADDEF"
     read -r ADR || ADR=''
     [ -n "$ADR" ] || ADR="$ADDEF"
     case "$ADR" in
-    1)
-      uci -q set "pia.$PIAWG_IF.iface_mace=0"
+    1 | 2)
+      dns_custom && uci -q delete "pia.$PIAWG_IF.iface_dns"
+      uci -q set "pia.$PIAWG_IF.iface_mace=$((ADR - 1))"
       break
       ;;
-    2)
-      uci -q set "pia.$PIAWG_IF.iface_mace=1"
-      break
+    3)
+      printf "DNS server address (IPv4): "
+      read -r ADC || ADC=''
+      if valid_ipv4 "$ADC"; then
+        uci -q set "pia.$PIAWG_IF.iface_dns=$ADC"
+        break
+      fi
+      echo "Invalid address: '$ADC'"
       ;;
     *) echo "Invalid choice: '$ADR'" ;;
     esac
   done
   uci -q commit pia
   dns_apply
+  # without the default route only the DNS host is routed to the tunnel
+  has_default_route "$PIAWG_IF" || set_default_route no
   echo "DNS server: $(uci -q get "pia.$PIAWG_IF.iface_dns")"
 }
 
@@ -1748,18 +1770,92 @@ std_mtu() {
   echo $((SMM - PIA_MTU_OVERHEAD))
 }
 
-# Packet size: PIA's standard one or the small one
+# Is $1 a custom packet size (digits only, 1280 to 1440)?
+valid_mtu() {
+  case "$1" in
+  '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge "$PIA_MTU_MIN" ] && [ "$1" -le "$PIA_MTU_OPTIMAL" ]
+}
+
+# Is $1 a keepalive in seconds (digits only, 1 to 65535)?
+valid_keepalive() {
+  case "$1" in
+  '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 5 ] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# Is $1 an IPv4 address?
+valid_ipv4() {
+  case "$1" in
+  '' | *[!0-9.]* | .* | *. | *..*) return 1 ;;
+  esac
+  VIOLD="$IFS"
+  IFS=.
+  # shellcheck disable=SC2086
+  set -- $1
+  IFS="$VIOLD"
+  [ $# -eq 4 ] || return 1
+  for VIX in "$@"; do
+    [ "${#VIX}" -le 3 ] && [ "$VIX" -le 255 ] || return 1
+  done
+}
+
+# Keepalive of the peer: PIA's 25 seconds, none (0) or a number of seconds
+ask_keepalive() {
+  [ -z "$AUTO" ] || return 0
+  AKCUR="$(uci -q get "pia.$PIAWG_IF.peer_persistent_keepalive")"
+  AKDEF=1
+  [ "$AKCUR" = 0 ] && AKDEF=2
+  [ -n "$AKCUR" ] && [ "$AKCUR" != 0 ] && [ "$AKCUR" != "$PIA_KEEPALIVE" ] && AKDEF=3
+  echo "Keepalive:"
+  echo "  1) Default ($PIA_KEEPALIVE seconds): the official apps' value"
+  echo "  2) Disabled (0)"
+  echo "  3) Custom (1 to 65535 seconds)"
+  [ -z "$AKCUR" ] || echo "  (now $AKCUR)"
+  while :; do
+    printf "Select the keepalive (press enter for %s): " "$AKDEF"
+    read -r AKR || AKR=''
+    [ -n "$AKR" ] || AKR="$AKDEF"
+    case "$AKR" in
+    1)
+      uci -q set "pia.$PIAWG_IF.peer_persistent_keepalive=$PIA_KEEPALIVE"
+      break
+      ;;
+    2)
+      uci -q set "pia.$PIAWG_IF.peer_persistent_keepalive=0"
+      break
+      ;;
+    3)
+      printf "Keepalive in seconds (1 to 65535): "
+      read -r AKC || AKC=''
+      if valid_keepalive "$AKC"; then
+        uci -q set "pia.$PIAWG_IF.peer_persistent_keepalive=$AKC"
+        break
+      fi
+      echo "Invalid keepalive: '$AKC'"
+      ;;
+    *) echo "Invalid choice: '$AKR'" ;;
+    esac
+  done
+  uci -q commit pia
+}
+
+# Packet size: PIA's standard one, optimal, small or a custom one
 ask_mtu() {
   [ -z "$AUTO" ] || return 0
   AMSTD="$(std_mtu)"
   AMCUR="$(uci -q get "pia.$PIAWG_IF.iface_mtu")"
   AMDEF=1
   [ -n "$AMCUR" ] && [ "$AMCUR" -eq "$PIA_MTU_OPTIMAL" ] && AMDEF=2
-  [ -n "$AMCUR" ] && [ "$AMCUR" -le "$PIA_MTU_SMALL" ] && AMDEF=3
+  [ -n "$AMCUR" ] && [ "$AMCUR" -eq "$PIA_MTU_SMALL" ] && AMDEF=3
+  [ -n "$AMCUR" ] && [ "$AMCUR" -ne "$AMSTD" ] && [ "$AMCUR" -ne "$PIA_MTU_OPTIMAL" ] && [ "$AMCUR" -ne "$PIA_MTU_SMALL" ] && AMDEF=4
   echo "Packet size (MTU):"
   echo "  1) Default ($AMSTD): recommended for IPv4 + IPv6 traffic"
   echo "  2) Optimal ($PIA_MTU_OPTIMAL): IPv4 only via WAN 1500 or PPPoE 1508"
   echo "  3) Small ($PIA_MTU_SMALL): improve compatibility for mobile networks"
+  echo "  4) Custom ($PIA_MTU_MIN to $PIA_MTU_OPTIMAL)"
   [ -z "$AMCUR" ] || echo "  (now $AMCUR)"
   while :; do
     printf "Select the packet size (press enter for %s): " "$AMDEF"
@@ -1777,6 +1873,15 @@ ask_mtu() {
     3)
       uci -q set "pia.$PIAWG_IF.iface_mtu=$PIA_MTU_SMALL"
       break
+      ;;
+    4)
+      printf "Packet size (%s to %s): " "$PIA_MTU_MIN" "$PIA_MTU_OPTIMAL"
+      read -r AMC || AMC=''
+      if valid_mtu "$AMC"; then
+        uci -q set "pia.$PIAWG_IF.iface_mtu=$AMC"
+        break
+      fi
+      echo "Invalid packet size: '$AMC'"
       ;;
     *) echo "Invalid choice: '$AMR'" ;;
     esac
@@ -2787,8 +2892,9 @@ print_usage() {
   echo "    - configure keys     : (the keys are kept in RAM only; nothing to configure)"
   echo "    - configure interface [name] : create an interface (a section of /etc/config/pia)"
   echo "    - configure protocol : AmneziaWG, WireGuard or automatic for the interface (asked when it is created)"
-  echo "    - configure dns      : default PIA DNS or MACE (asked when the interface is created)"
-  echo "    - configure mtu      : default, optimal or small packet size (asked when the interface is created)"
+  echo "    - configure dns      : PIA DNS, PIA with MACE or a custom DNS server (asked when the interface is created)"
+  echo "    - configure mtu      : default, optimal, small or custom packet size (asked when the interface is created)"
+  echo "    - configure keepalive: default (25), disabled or custom keepalive (asked when the interface is created)"
   echo "    - configure rename <name>    : rename the interface (-i old)"
   echo "    - configure remove <name>    : forget an interface (config, network sections, cron)"
   echo "    - configure cache    : set offline cache directory and options"
@@ -2868,6 +2974,8 @@ api_iface_json() {
   proto_is_auto "$PIAWG_IF" && AIAUTO=1
   AIMACE=0
   dns_mace && AIMACE=1
+  AICUSTOM=0
+  dns_custom && AICUSTOM=1
   jq -nc --arg name "$PIAWG_IF" \
     --arg rid "$(uci -q get "pia.$PIAWG_IF.region_id")" \
     --arg rname "$(uci -q get "pia.$PIAWG_IF.region_name")" \
@@ -2877,6 +2985,8 @@ api_iface_json() {
     --arg proto "$PIAPROTO" --argjson auto "$AIAUTO" \
     --arg dnsip "$(dns_hosts)" --argjson mace "$AIMACE" \
     --arg mtu "$(uci -q get "pia.$PIAWG_IF.iface_mtu")" \
+    --arg keep "$(uci -q get "pia.$PIAWG_IF.peer_persistent_keepalive")" \
+    --argjson custom "$AICUSTOM" \
     --argjson route "$AIDR" \
     --arg fw "$(uci -q get "pia.$PIAWG_IF.fw_zone")" \
     --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
@@ -2886,9 +2996,9 @@ api_iface_json() {
     '{name: $name,
       region: {id: $rid, name: $rname, country: $rcountry},
       fast: ($fast == "1"), proto: $proto, auto: ($auto == 1),
-      dns: (if $mace == 1 then "mace" else "standard" end), dns_ip: $dnsip,
+      dns: (if $custom == 1 then "custom" elif $mace == 1 then "mace" else "standard" end), dns_ip: $dnsip,
       streaming: ($rdns | contains("-so.")),
-      mtu: ($mtu | tonumber? // null), default_route: ($route == 1),
+      mtu: ($mtu | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
       dip: ($dip != ""), up: $up, handshake: ($hs | tonumber? // null),
       endpoint: ($ep | if . == "" then null else . end), job: $job}'
@@ -3007,13 +3117,15 @@ api_job() {
 }
 
 # api_iface_save <name> [key=value…]: create or modify an interface
-#   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace
-#   mtu=std|small|<576-1500>  route=yes|no  firewall=yes|no  forward="<zones>"  strict=yes
+#   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace|custom
+#   dns_ip=<IPv4 of a custom DNS server>  mtu=std|optimal|small|<1280-1440>
+#   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
+#   forward="<zones>"  strict=yes|no (default yes: strict-order on dnsmasq)
 api_iface_save() {
   AN="$1"
   shift
   valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
-  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_MTU='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET=''
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET=''
   for AKV in "$@"; do
     AV="${AKV#*=}"
     case "$AKV" in
@@ -3021,7 +3133,9 @@ api_iface_save() {
     region=*) A_REGION="$AV" ;;
     fast=*) A_FAST="$AV" ;;
     dns=*) A_DNS="$AV" ;;
+    dns_ip=*) A_DNSIP="$AV" ;;
     mtu=*) A_MTU="$AV" ;;
+    keepalive=*) A_KEEP="$AV" ;;
     route=*) A_ROUTE="$AV" ;;
     firewall=*) A_FW="$AV" ;;
     forward=*)
@@ -3034,14 +3148,21 @@ api_iface_save() {
   done
   case "$A_PROTO" in '' | amneziawg | wireguard | auto) ;; *) api_fail "Invalid protocol" ;; esac
   case "$A_FAST" in '' | 0 | 1) ;; *) api_fail "Invalid fast region value" ;; esac
-  case "$A_DNS" in '' | standard | mace) ;; *) api_fail "Invalid DNS choice" ;; esac
+  case "$A_DNS" in '' | standard | mace | custom) ;; *) api_fail "Invalid DNS choice" ;; esac
+  if [ "$A_DNS" = 'custom' ] || [ -n "$A_DNSIP" ]; then
+    valid_ipv4 "$A_DNSIP" || api_fail "Invalid DNS server: an IPv4 address"
+    [ "$A_DNS" = 'custom' ] || api_fail "A DNS server address needs the custom DNS choice"
+  fi
   case "$A_ROUTE" in '' | yes | no) ;; *) api_fail "Invalid route choice" ;; esac
   case "$A_FW" in '' | yes | no) ;; *) api_fail "Invalid firewall choice" ;; esac
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_MTU" in
   '' | std | optimal | small) ;;
-  *[!0-9]*) api_fail "Invalid packet size" ;;
-  *) { [ "$A_MTU" -ge 576 ] && [ "$A_MTU" -le 1500 ]; } || api_fail "Packet size: 576 to 1500" ;;
+  *) valid_mtu "$A_MTU" || api_fail "Packet size: digits only, $PIA_MTU_MIN to $PIA_MTU_OPTIMAL" ;;
+  esac
+  case "$A_KEEP" in
+  '' | default | off) ;;
+  *) valid_keepalive "$A_KEEP" || api_fail "Keepalive: digits only, 1 to 65535" ;;
   esac
   for AZ in $A_FWD; do
     case "$AZ" in *[!A-Za-z0-9_-]*) api_fail "Invalid zone name" ;; esac
@@ -3120,17 +3241,28 @@ api_iface_save() {
   0) uci -q delete "pia.$AN.region_fast" ;;
   esac
   case "$A_DNS" in
-  standard) uci -q set "pia.$AN.iface_mace=0" ;;
-  mace) uci -q set "pia.$AN.iface_mace=1" ;;
+  standard | mace)
+    dns_custom && uci -q delete "pia.$AN.iface_dns"
+    uci -q set "pia.$AN.iface_mace=$([ "$A_DNS" = mace ] && echo 1 || echo 0)"
+    ;;
+  custom) uci -q set "pia.$AN.iface_dns=$A_DNSIP" ;;
   esac
   uci -q commit pia
   dns_apply
+  # the PIA DNS host or the custom one is what the tunnel carries without the default route
+  if [ -n "$A_DNS" ] && ! has_default_route "$AN"; then set_default_route no; fi
   case "$A_MTU" in
   std) uci -q set "pia.$AN.iface_mtu=$(std_mtu)" ;;
   optimal) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_OPTIMAL" ;;
   small) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_SMALL" ;;
   '') ;;
   *) uci -q set "pia.$AN.iface_mtu=$A_MTU" ;;
+  esac
+  case "$A_KEEP" in
+  default) uci -q set "pia.$AN.peer_persistent_keepalive=$PIA_KEEPALIVE" ;;
+  off) uci -q set "pia.$AN.peer_persistent_keepalive=0" ;;
+  '') ;;
+  *) uci -q set "pia.$AN.peer_persistent_keepalive=$A_KEEP" ;;
   esac
   uci -q commit pia
   case "$A_ROUTE" in
@@ -3165,7 +3297,7 @@ api_iface_save() {
     ;;
   esac
   # dnsmasq: the PIA servers first
-  if [ "$A_STRICT" = 'yes' ]; then
+  if [ "$A_STRICT" != 'no' ]; then
     DSLIST=''
     for DSX in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p'); do
       [ "$(uci -q get "dhcp.$DSX.noresolv")" = '1' ] && continue
@@ -3388,6 +3520,10 @@ case "$1" in
   'mtu')
     iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
     ask_mtu
+    ;;
+  'keepalive')
+    iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
+    ask_keepalive
     ;;
   'protocol')
     iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
