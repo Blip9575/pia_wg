@@ -100,14 +100,14 @@ function fail(res) {
 const DNSOPTS = [
 	[ 'standard', _('PIA'), _('Recommended for PIA.') ],
 	[ 'mace', _('PIA with MACE'), _('Blocks ads, trackers and malware') ],
-	[ 'custom', _('Custom'), _('A DNS server of your own, reached through the tunnel instead of PIA\'s.') ]
+	[ 'custom', _('Custom'), _('Provide DNS server address') ]
 ];
 
 const MTU_MIN = 1280, MTU_MAX = 1440, KEEPALIVE = 25;
 const KEEPOPTS = [
 	[ 'default', _('Default (%d)').format(KEEPALIVE), _('The value of the official PIA apps.') ],
 	[ 'off', _('Disabled (0)'), _('No keepalive packets: a NAT or firewall in between may drop the idle tunnel.') ],
-	[ 'custom', _('Custom'), _('Seconds between keepalive packets (1 to 65535).') ]
+	[ 'custom', _('Custom'), _('Seconds between keepalive packets.') ]
 ];
 
 // a number-only input: digits are all it takes; ok() tells if the value is in range
@@ -135,7 +135,7 @@ function mtuOpts(st) {
 		[ 'std', _('Default (%d)').format(st.std_mtu), _('Recommended for IPv4 + IPv6 traffic') ],
 		[ 'optimal', _('Optimal (%d)').format((st.optimal_mtu || 1440)), _('IPv4 only via WAN 1500 or PPPoE 1508.') ],
 		[ 'small', _('Small (%d)').format(st.small_mtu), _('Improve compatibility for mobile networks') ],
-		[ 'custom', _('Custom'), _('%d to %d').format(MTU_MIN, MTU_MAX) ]
+		[ 'custom', _('Custom'), _('Provide MTU value') ]
 	];
 }
 
