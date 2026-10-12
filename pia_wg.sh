@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.6.0
+# Version: 1.6.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1450,30 +1450,58 @@ ask_firewall() {
 }
 
 # dnsmasq only keeps the order of the servers of resolv.conf.auto (PIA's first,
-# by dns_metric) with strict-order; offer it for the instances that use it
-dns_offer_strict() {
-  [ "$(uci -q get "pia.$PIAWG_IF.dns_asked")" = '1' ] && return 0
-  DSLIST=''
-  for DSX in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p'); do
-    [ "$(uci -q get "dhcp.$DSX.noresolv")" = '1' ] && continue
-    [ "$(uci -q get "dhcp.$DSX.strictorder")" = '1' ] && continue
-    DSLIST="$DSLIST $DSX"
-  done
-  if [ -n "$DSLIST" ]; then
-    echo "dnsmasq instance(s) using the interfaces' DNS servers:$DSLIST"
-    echo "Without strict-order dnsmasq may still query the WAN's servers; with it the"
-    echo "PIA servers (lowest dns_metric) are tried first."
-    if read_yn "Set strict-order on them" y; then
-      persist_run dns_strict_set
-      /etc/init.d/dnsmasq reload >/dev/null 2>&1
+# by dns_metric) with strict-order. It follows the default route: set on the
+# instances that use the interfaces' DNS servers while a PIA interface has the
+# default route, removed (only from the instances set here, listed in
+# pia.account.strict_set) when none has it
+strict_sync() {
+  SSANY=''
+  for SSI in $(iface_list); do
+    if has_default_route "$SSI"; then
+      SSANY=1
+      break
     fi
+  done
+  DSLIST=''
+  if [ -n "$SSANY" ]; then
+    for DSX in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p'); do
+      [ "$(uci -q get "dhcp.$DSX.noresolv")" = '1' ] && continue
+      [ "$(uci -q get "dhcp.$DSX.strictorder")" = '1' ] && continue
+      DSLIST="$DSLIST $DSX"
+    done
+    [ -n "$DSLIST" ] || return 0
+    persist_run dns_strict_set
+    if uci -q get pia.account >/dev/null; then
+      SSOLD="$(uci -q get pia.account.strict_set)"
+      uci -q set "pia.account.strict_set=${SSOLD}${DSLIST}"
+      uci -q commit pia
+    fi
+    echo "Strict-order set on:$DSLIST (it follows the default route)"
+  else
+    for DSX in $(uci -q get pia.account.strict_set); do
+      [ "$(uci -q get "dhcp.$DSX.strictorder")" = '1' ] && DSLIST="$DSLIST $DSX"
+    done
+    if [ -n "$DSLIST" ]; then
+      persist_run dns_strict_clear
+      echo "Strict-order removed from:$DSLIST (no interface has the default route)"
+    fi
+    [ -z "$(uci -q get pia.account.strict_set)" ] || {
+      uci -q delete pia.account.strict_set
+      uci -q commit pia
+    }
+    [ -n "$DSLIST" ] || return 0
   fi
-  uci -q set "pia.$PIAWG_IF.dns_asked=1"
-  uci -q commit pia
+  /etc/init.d/dnsmasq reload >/dev/null 2>&1
+  return 0
 }
 
 dns_strict_set() {
   for DSX in $DSLIST; do uci -q set "dhcp.$DSX.strictorder=1"; done
+  uci -q commit dhcp
+}
+
+dns_strict_clear() {
+  for DSX in $DSLIST; do uci -q delete "dhcp.$DSX.strictorder"; done
   uci -q commit dhcp
 }
 
@@ -1502,7 +1530,7 @@ iface_wizard() {
     uci -q set "pia.$PIAWG_IF.fw_asked=1"
     uci -q commit pia
   fi
-  dns_offer_strict
+  strict_sync
 }
 
 # Create an interface section ($1: the name; asked if missing)
@@ -1594,6 +1622,7 @@ remove_iface() {
   uci -q commit pia
   rm -f "$SESSION"
   echo "Interface $PIAWG_IF removed"
+  strict_sync
   # one left without the default route: offer it back
   RMLEFT="$(iface_list)"
   if [ -n "$RMLEFT" ] && [ "$(echo "$RMLEFT" | wc -l)" -eq 1 ] && [ -z "$AUTO" ] && ! has_default_route "$RMLEFT"; then
@@ -1601,6 +1630,7 @@ remove_iface() {
     set_ifvars
     if read_yn "Make $PIAWG_IF the default route again" y; then
       set_default_route yes
+      strict_sync
       echo "Applies at the next restart of $PIAWG_IF"
     fi
   fi
@@ -3120,7 +3150,7 @@ api_job() {
 #   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace|custom
 #   dns_ip=<IPv4 of a custom DNS server>  mtu=std|optimal|small|<1280-1440>
 #   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
-#   forward="<zones>"  strict=yes|no (default yes: strict-order on dnsmasq)
+#   forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
 api_iface_save() {
   AN="$1"
   shift
@@ -3296,21 +3326,8 @@ api_iface_save() {
     fi
     ;;
   esac
-  # dnsmasq: the PIA servers first
-  if [ "$A_STRICT" != 'no' ]; then
-    DSLIST=''
-    for DSX in $(uci -q show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p'); do
-      [ "$(uci -q get "dhcp.$DSX.noresolv")" = '1' ] && continue
-      [ "$(uci -q get "dhcp.$DSX.strictorder")" = '1' ] && continue
-      DSLIST="$DSLIST $DSX"
-    done
-    if [ -n "$DSLIST" ]; then
-      persist_run dns_strict_set
-      /etc/init.d/dnsmasq reload >/dev/null 2>&1
-    fi
-    uci -q set "pia.$AN.dns_asked=1"
-    uci -q commit pia
-  fi
+  # dnsmasq: strict order follows the default route
+  [ "$A_STRICT" = 'no' ] || strict_sync >/dev/null
   # a new region: check in the background which of its country's regions need
   # the legacy token (the next start waits for it instead of being refused)
   if [ -n "$A_REGION" ]; then
@@ -3497,10 +3514,12 @@ case "$1" in
     keep_conf_section 'net_peer' || set_defnetpeer
     iface_defaults
     [ -n "$AUTO" ] || ask_default_route
+    strict_sync
     ;;
   'route')
     iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
     ask_default_route
+    strict_sync
     ;;
   'firewall')
     iface_exists "$PIAWG_IF" || set_iface "$SELIF" || exit 1
