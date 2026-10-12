@@ -392,7 +392,7 @@ return view.extend({
 	// ---- region picker (add and edit) ------------------------------------
 
 	// -> { node, get(): { region, fast } }; 'proto' picks the servers list
-	regionPicker: function(proto, current, fast, onchange) {
+	regionPicker: function(proto, current, fast, onchange, placeholder) {
 		let kind = proto;
 		const box = E('div');
 		const state = { region: current ? current.id : '', fast: !!fast, regions: null };
@@ -420,28 +420,32 @@ return view.extend({
 			shown.forEach(r => { countries[r.country] = (countries[r.country] || 0) + 1; });
 			const codes = Object.keys(countries).sort((a, b) => countryName(a).localeCompare(countryName(b)));
 			const cur = shown.find(r => r.id == state.region);
+			// adding: no location is chosen until the user picks one
 			if (codes.indexOf(state.country) < 0)
-				state.country = cur ? cur.country : (codes.indexOf('GB') >= 0 ? 'GB' : codes[0]);
+				state.country = placeholder ? '' : cur ? cur.country : (codes.indexOf('GB') >= 0 ? 'GB' : codes[0]);
 
 			const regionSel = E('select', { 'class': 'cbi-input-select', 'change': ev => { state.region = ev.target.value; if (onchange) onchange(); } });
 			const fill = () => {
-				const items = shown.filter(r => r.country == state.country);
+				const items = state.country ? shown.filter(r => r.country == state.country) : [];
 				dom.content(regionSel, items.map(r => E('option', { 'value': r.id, 'selected': r.id == state.region ? '' : null }, r.name)));
 				if (!items.some(r => r.id == state.region)) state.region = items.length ? items[0].id : '';
 				regionSel.value = state.region;
+				regionSel.disabled = !state.country;
 				if (onchange) onchange();
 			};
-			const countrySel = select(codes.map(c => [ c, '%s (%d)'.format(countryName(c), countries[c]) ]), state.country, ev => {
+			const countrySel = select((placeholder ? [ [ '', _('Select VPN location') ] ] : []).concat(
+				codes.map(c => [ c, '%s (%d)'.format(countryName(c), countries[c]) ])), state.country, ev => {
 				state.country = ev.target.value;
 				fill();
 			});
+			if (placeholder) countrySel.options[0].disabled = true;
 			const so = checkbox(state.so, ev => { state.so = ev.target.checked; draw(); });
 			const pf = checkbox(state.pf, ev => { state.pf = ev.target.checked; draw(); });
 			const ng = checkbox(state.ng, ev => { state.ng = ev.target.checked; draw(); });
 			const fastCb = checkbox(state.fast, ev => { state.fast = ev.target.checked; });
 			fill();
 			dom.content(box, [
-				field(_('Exclude virtual VPN locations'), ng, _('List physical VPN locations only.')),
+				field(_('Physical VPN locations only'), ng, _('Exclude virtual VPN locations')),
 				field(_('Streaming optimised only'), so, _('List streaming optimised regions only')),
 				field(_('Port forwarding only'), pf, _('List port forwarding regions only')),
 				field(_('VPN location'), countrySel, _('Location of VPN endpoint')),
@@ -519,7 +523,7 @@ return view.extend({
 			dom.content(regionBox, field(_('Region Selection'), E('span', i.region.name), _('Set by the dedicated IP.')));
 		}
 		else {
-			picker = this.regionPicker(pickerProto(), !adding && i.region.id ? { id: i.region.id } : null, !adding && i.fast);
+			picker = this.regionPicker(pickerProto(), !adding && i.region.id ? { id: i.region.id } : null, !adding && i.fast, null, adding);
 			dom.content(regionBox, picker.node);
 			protoSel.addEventListener('change', () => picker.reload(pickerProto()));
 		}
