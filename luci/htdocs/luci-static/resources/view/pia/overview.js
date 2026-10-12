@@ -6,7 +6,7 @@
 'require dom';
 
 /*
- * PIA VPN: account, interfaces and a wizard to create them.
+ * PIA VPN: account and interfaces (one dialog to add or edit).
  * The work is done by pia.sh (api commands) through the rpcd plugin luci.pia.
  */
 
@@ -299,7 +299,7 @@ return view.extend({
 		const list = this.st.interfaces;
 		if (!list.length)
 			return [ E('tr', { 'class': 'tr placeholder' }, [ E('td', { 'class': 'td', 'colspan': 6 },
-				E('em', _('No interface yet: use the wizard to create one.'))) ]) ];
+				E('em', _('No interface yet: use Add interface to create one.'))) ]) ];
 		return list.map(i => {
 			const busy = i.job && i.job.state == 'running';
 			const btn = (cls, label, fn, dis) => E('button', {
@@ -320,7 +320,7 @@ return view.extend({
 					' ',
 					btn('cbi-button-neutral', _('Stop'), () => this.doAction(i.name, 'stop', _('Stopping %s').format(i.name)), !i.up),
 					' ',
-					btn('cbi-button-edit', _('Edit'), () => this.openEdit(i)),
+					btn('cbi-button-edit', _('Edit'), () => this.openForm(i)),
 					' ',
 					btn('cbi-button-remove', _('Remove'), () => this.doRemove(i))
 				]))
@@ -371,7 +371,7 @@ return view.extend({
 					'class': 'cbi-button cbi-button-add',
 					'disabled': (this.st.account.id && this.st.account.password_set) ? null : '',
 					'title': (this.st.account.id && this.st.account.password_set) ? null : _('Save the account first'),
-					'click': ui.createHandlerFn(this, () => this.openWizard())
+					'click': ui.createHandlerFn(this, () => this.openForm(null))
 				}, _('Add interface…'))
 			])
 		]);
@@ -389,10 +389,11 @@ return view.extend({
 		}
 	},
 
-	// ---- region picker (wizard and edit) ------------------------------------
+	// ---- region picker (add and edit) ------------------------------------
 
 	// -> { node, get(): { region, fast } }; 'proto' picks the servers list
 	regionPicker: function(proto, current, fast, onchange) {
+		let kind = proto;
 		const box = E('div');
 		const state = { region: current ? current.id : '', fast: !!fast, regions: null };
 		const self = this;
@@ -449,7 +450,7 @@ return view.extend({
 			]);
 		};
 
-		const load = () => callRegions(proto).then(r => {
+		const load = () => callRegions(kind).then(r => {
 			state.regions = (r && r.ok && r.regions) || [];
 			draw();
 		});
@@ -457,242 +458,132 @@ return view.extend({
 		dom.content(box, E('p', { 'class': 'spinning' }, _('Loading the regions…')));
 		load();
 
-		return { node: box, get: () => {
+		return { node: box, reload: p => {
+			if (p == kind) return;
+			kind = p;
+			dom.content(box, E('p', { 'class': 'spinning' }, _('Loading the regions…')));
+			load();
+		}, get: () => {
 			const r = (state.regions || []).find(x => x.id == state.region);
 			return { region: state.region, name: r ? r.name : state.region, fast: state.fast, streaming: !!(r && r.streaming) };
 		}, state: state };
 	},
 
-	// ---- wizard ---------------------------------------------------------------
+	// ---- add and edit: one dialog -------------------------------------------------
 
-	openWizard: function() {
+	// i: the interface to edit, or null to add one
+	openForm: function(i) {
 		const st = this.st;
-		const self = this;
-		const others = st.interfaces;
-		const holderIf = others.find(i => i.default_route);
-		const taken = !!holderIf;
-		const d = {
-			name: others.some(i => i.name == 'pia') ? '' : 'pia', proto: st.awg ? 'amneziawg' : 'wireguard', dns: 'standard', mtu: 'std',
-			route: !taken, firewall: true, forward: st.lan_zone ? [ st.lan_zone ] : [], strict: true
-		};
-		let picker = null;
-		let step = 0;
+		const adding = !i;
+		const others = st.interfaces.filter(o => !i || o.name != i.name);
+		const holder = others.find(o => o.default_route);
+		const awgOk = !!st.awg;
+		const protoCtl = selectHelp(PROTOS.filter(p => awgOk || p[0] == 'wireguard'),
+			adding ? (awgOk ? 'amneziawg' : 'wireguard') : (i.auto ? 'auto' : i.proto), null,
+			() => !awgOk ? _('AmneziaWG is not installed on this router.')
+				: adding ? null
+				: i.dip ? _('A dedicated IP needs WireGuard.')
+				: _('Changing the protocol makes a new key and the region must have servers for it.'));
+		const protoSel = protoCtl.node;
+		if (!adding && i.dip) protoSel.disabled = true;
 
+		const nameInp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': adding && !others.some(o => o.name == 'pia') ? 'pia' : '',
+			'maxlength': 15, 'placeholder': 'pia', 'spellcheck': 'false' });
 		const nameOk = n => /^[A-Za-z0-9_]{1,15}$/.test(n) && [ 'account', 'apitoken', 'vpntoken', 'cache', 'log' ].indexOf(n) < 0;
 
-		const steps = [
-			{
-				title: _('Interface Name'),
-				render: () => {
-					const inp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': d.name, 'maxlength': 15,
-						'placeholder': 'pia', 'spellcheck': 'false' });
-					return { node: field(_('Interface Name'), inp, _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')),
-						collect: () => {
-							d.name = inp.value.trim();
-							if (!nameOk(d.name)) return _('Invalid name: 1 to 15 letters, digits or underscore');
-							if (others.some(i => i.name == d.name)) return _('An interface with that name exists');
-						} };
-				}
-			},
-			{
-				title: _('Protocol Selection'),
-				render: () => {
-					const c = selectHelp(PROTOS.filter(p => st.awg || p[0] == 'wireguard'), d.proto, null,
-						st.awg ? null : () => _('AmneziaWG is not installed on this router.'));
-					return { node: field(_('Protocol Selection'), c.node, c.help),
-						collect: () => { d.proto = c.node.value; } };
-				}
-			},
-			{
-				title: _('Region Selection'),
-				render: () => {
-					picker = this.regionPicker(d.proto == 'wireguard' ? 'wireguard' : 'amneziawg', d.region, d.fast);
-					return { node: picker.node, collect: () => {
-						const g = picker.get();
-						if (!g.region) return _('Choose a region');
-						d.region = { id: g.region };
-						d.regionName = g.name;
-						d.streaming = g.streaming;
-						d.fast = g.fast;
-					} };
-				}
-			},
-			{
-				title: _('DNS servers'),
-				render: () => {
-					const c = selectHelp(DNSOPTS, d.dns);
-					return { node: field(_('DNS servers'), c.node, c.help), collect: () => { d.dns = c.node.value; } };
-				}
-			},
-			{
-				title: _('Packet size'),
-				render: () => {
-					const c = selectHelp(mtuOpts(st), d.mtu);
-					return { node: field(_('Packet size (MTU)'), c.node, c.help), collect: () => { d.mtu = c.node.value; } };
-				}
-			},
-			{
-				title: _('Routing'),
-				render: () => {
-					const cb = checkbox(d.route);
-					if (taken) {
-						cb.disabled = true;
-						cb.checked = false;
-					}
-					return { node: field(_('Default route'), cb, taken
-						? routeTaken(holderIf.name)
-						: _('Recommended to send all traffic via PIA.')),
-						collect: () => { d.route = taken ? false : cb.checked; } };
-				}
-			},
-			{
-				title: _('Firewall'),
-				render: () => {
-					const fw = checkbox(d.firewall);
-					const zones = st.zones.filter(z => z != d.name && !/^Block-/.test(z));
-					const boxes = zones.map(z => [ z, checkbox(d.forward.indexOf(z) >= 0) ]);
-					const st2 = checkbox(d.strict);
-					return { node: E('div', [
-							field(_('Firewall zone'), fw, _('Recommended to create zone with NAT and MSS clamping')),
-							field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
-								_('The zones whose traffic may go through this VPN.')),
-							field(_('PIA DNS Server'), st2, _('Recommended to prevent DNS leakage'))
-						]),
-						collect: () => {
-							d.firewall = fw.checked;
-							d.forward = boxes.filter(b => b[1].checked).map(b => b[0]);
-							d.strict = st2.checked;
-						} };
-				}
-			},
-			{
-				title: _('Review'),
-				render: () => {
-					const rows = [
-						[ _('Interface Name'), d.name ],
-						[ _('Protocol Selection'), PROTOS.filter(p => p[0] == d.proto)[0][1] ],
-						[ _('Region Selection'), d.regionName + (d.fast ? ' · ' + _('fastest of its country at each start') : '') ],
-						[ _('DNS servers'), dnsLabel(st, dnsFor(st, d.dns == 'mace', d.streaming)) ],
-						[ _('Packet size'), mtuOpts(st).find(o => o[0] == d.mtu)[1] ],
-						[ _('Default route'), d.route ? _('yes') : _('no') ],
-						[ _('Firewall'), d.firewall ? _('zone %s, forwarding from: %s').format(d.name, d.forward.join(', ') || _('none')) : _('none') ]
-					];
-					return { node: E('div', rows.map(r => field(r[0], E('span', r[1])))), collect: () => null };
-				}
-			}
-		];
-
-		const show = () => {
-			const s = steps[step];
-			const r = s.render();
-			const err = E('div', { 'class': 'alert-message warning', 'style': 'display:none' });
-			const last = step == steps.length - 1;
-			const go = dir => {
-				const e = r.collect();
-				if (e) {
-					err.textContent = e;
-					err.style.display = '';
-					return;
-				}
-				if (dir > 0 && last) return create();
-				step += dir;
-				show();
-			};
-			ui.showModal(_('Add interface') + ' – ' + s.title + ' (%d/%d)'.format(step + 1, steps.length), [
-				r.node,
-				err,
-				E('div', { 'class': 'right' }, [
-					E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ',
-					E('button', { 'class': 'cbi-button', 'disabled': step ? null : '',
-						'click': () => { r.collect(); step--; show(); } }, _('Back')), ' ',
-					E('button', { 'class': 'cbi-button cbi-button-positive important', 'click': () => go(1) },
-						last ? _('Create') : _('Next'))
-				])
-			]);
-		};
-
-		const create = () => {
-			ui.showModal(_('Add interface'), E('p', { 'class': 'spinning' }, _('Creating the interface…')));
-			callSave(d.name, d.proto, d.region.id, d.fast ? '1' : '0', d.dns, d.mtu, d.route ? 'yes' : 'no',
-				d.firewall ? 'yes' : 'no', d.firewall ? d.forward.join(' ') : null, d.strict ? 'yes' : 'no').then(r => {
-				if (!r || !r.ok) {
-					ui.hideModal();
-					return fail(r);
-				}
-				this.refresh();
-				ui.showModal(_('Interface %s created').format(d.name), [
-					E('p', _('Start it now? The first start registers a key with PIA and can take up to a minute.')),
-					E('div', { 'class': 'right' }, [
-						E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Later')), ' ',
-						E('button', { 'class': 'cbi-button cbi-button-positive important',
-							'click': () => this.doAction(d.name, 'start', _('Starting %s').format(d.name)) }, _('Start'))
-					])
-				]);
-			});
-		};
-
-		show();
-	},
-
-	// ---- edit --------------------------------------------------------------------
-
-	openEdit: function(i) {
-		const st = this.st;
-		const protoCtl = selectHelp(PROTOS.filter(p => st.awg || p[0] == 'wireguard'),
-			i.auto ? 'auto' : i.proto, null,
-			() => i.dip ? _('A dedicated IP needs WireGuard.') : _('Changing the protocol makes a new key and the region must have servers for it.'));
-		const protoSel = protoCtl.node;
-		if (i.dip) protoSel.disabled = true;
-		const dnsCtl = selectHelp(DNSOPTS, i.dns == 'mace' ? 'mace' : 'standard');
-		const cur = i.mtu;
+		const dnsCtl = selectHelp(DNSOPTS, adding || i.dns != 'mace' ? 'standard' : 'mace');
+		const cur = adding ? 0 : i.mtu;
 		const custom = (cur && cur != st.std_mtu && cur != (st.optimal_mtu || 1440) && cur != st.small_mtu) ? [ [ String(cur), _('Custom (%d)').format(cur), '' ] ] : [];
 		const mtuCtl = selectHelp(mtuOpts(st).concat(custom), !cur || cur == st.std_mtu ? 'std' : cur == (st.optimal_mtu || 1440) ? 'optimal' : cur == st.small_mtu ? 'small' : String(cur));
-		const holder = st.interfaces.find(o => o.name != i.name && o.default_route);
-		const routeCb = checkbox(i.default_route);
-		if (holder) routeCb.disabled = true;
-		const fwCb = checkbox(i.firewall);
-		const zones = st.zones.filter(z => z != i.name && !/^Block-/.test(z));
-		const boxes = zones.map(z => [ z, checkbox(i.forward.indexOf(z) >= 0) ]);
+
+		const routeCb = checkbox(adding ? !holder : i.default_route);
+		if (holder) {
+			routeCb.disabled = true;
+			routeCb.checked = !adding && i.default_route;
+		}
+		const fwCb = checkbox(adding ? true : i.firewall);
+		const zones = st.zones.filter(z => (adding || z != i.name) && !/^Block-/.test(z));
+		const fwd = adding ? (st.lan_zone ? [ st.lan_zone ] : []) : i.forward;
+		const boxes = zones.map(z => [ z, checkbox(fwd.indexOf(z) >= 0) ]);
+		// strict order is a setting of dnsmasq, set here but never cleared here
+		const strictCb = checkbox(adding ? true : !!st.strict_dns);
+		if (st.strict_dns) {
+			strictCb.checked = true;
+			strictCb.disabled = true;
+		}
 
 		const regionBox = E('div');
 		let picker = null;
-		if (i.dip) {
+		const pickerProto = () => protoSel.value == 'wireguard' ? 'wireguard' : 'amneziawg';
+		if (!adding && i.dip) {
 			dom.content(regionBox, field(_('Region Selection'), E('span', i.region.name), _('Set by the dedicated IP.')));
 		}
 		else {
-			picker = this.regionPicker(i.proto, i.region.id ? { id: i.region.id } : null, i.fast);
+			picker = this.regionPicker(pickerProto(), !adding && i.region.id ? { id: i.region.id } : null, !adding && i.fast);
 			dom.content(regionBox, picker.node);
+			protoSel.addEventListener('change', () => picker.reload(pickerProto()));
 		}
+
+		const err = E('div', { 'class': 'alert-message warning', 'style': 'display:none' });
+		const problem = msg => {
+			err.textContent = msg;
+			err.style.display = '';
+		};
 
 		const save = restart => {
 			const g = picker ? picker.get() : null;
-			ui.showModal(_('Saving %s').format(i.name), E('p', { 'class': 'spinning' }, _('Saving…')));
-			return callSave(i.name, protoSel.value, g ? g.region : null, g ? (g.fast ? '1' : '0') : null, dnsCtl.node.value, mtuCtl.node.value,
+			let name = adding ? nameInp.value.trim() : i.name;
+			if (adding) {
+				if (!nameOk(name)) return problem(_('Invalid name: 1 to 15 letters, digits or underscore'));
+				if (others.some(o => o.name == name)) return problem(_('An interface with that name exists'));
+			}
+			if (picker && !g.region) return problem(_('Choose a region'));
+			const title = adding ? _('Add interface') : _('Saving %s').format(name);
+			ui.showModal(title, E('p', { 'class': 'spinning' }, adding ? _('Creating the interface…') : _('Saving…')));
+			return callSave(name, protoSel.value, g ? g.region : null, g ? (g.fast ? '1' : '0') : null, dnsCtl.node.value, mtuCtl.node.value,
 				routeCb.disabled ? null : (routeCb.checked ? 'yes' : 'no'), fwCb.checked ? 'yes' : 'no',
-				fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null, null).then(r => {
+				fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
+				strictCb.disabled ? null : (strictCb.checked ? 'yes' : 'no')).then(r => {
 				ui.hideModal();
 				if (!r || !r.ok) return fail(r);
 				this.refresh();
-				if (restart) return this.doAction(i.name, 'restart', _('Restarting %s').format(i.name));
+				if (adding) {
+					ui.showModal(_('Interface %s created').format(name), [
+						E('p', _('Start it now? The first start registers a key with PIA and can take up to a minute.')),
+						E('div', { 'class': 'right' }, [
+							E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Later')), ' ',
+							E('button', { 'class': 'cbi-button cbi-button-positive important',
+								'click': () => this.doAction(name, 'start', _('Starting %s').format(name)) }, _('Start'))
+						])
+					]);
+					return;
+				}
+				if (restart) return this.doAction(name, 'restart', _('Restarting %s').format(name));
 				if (i.up)
-					ui.addNotification(null, E('p', _('Saved. The changes apply when %s is restarted.').format(i.name)), 'info');
+					ui.addNotification(null, E('p', _('Saved. The changes apply when %s is restarted.').format(name)), 'info');
 			});
 		};
 
-		ui.showModal(_('Settings of %s').format(i.name), [
-			field(_('Protocol Selection'), protoSel, protoCtl.help),
-			regionBox,
-			field(_('DNS servers'), dnsCtl.node, dnsCtl.help),
-			field(_('Packet size (MTU)'), mtuCtl.node, mtuCtl.help),
-			field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : null),
-			field(_('Firewall zone'), fwCb),
-			field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ])))),
-			E('div', { 'class': 'right' }, [
-				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ',
-				E('button', { 'class': 'cbi-button cbi-button-save', 'click': ui.createHandlerFn(this, () => save(false)) }, _('Save')), ' ',
-				E('button', { 'class': 'cbi-button cbi-button-positive important', 'click': ui.createHandlerFn(this, () => save(true)) }, _('Save and restart'))
-			])
-		]);
+		const buttons = adding
+			? [ E('button', { 'class': 'cbi-button cbi-button-positive important', 'click': ui.createHandlerFn(this, () => save(false)) }, _('Create')) ]
+			: [ E('button', { 'class': 'cbi-button cbi-button-save', 'click': ui.createHandlerFn(this, () => save(false)) }, _('Save')), ' ',
+				E('button', { 'class': 'cbi-button cbi-button-positive important', 'click': ui.createHandlerFn(this, () => save(true)) }, _('Save and restart')) ];
+
+		ui.showModal(adding ? _('Add interface') : _('Settings of %s').format(i.name), [].concat(
+			adding ? [ field(_('Interface Name'), nameInp, _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')) ] : [],
+			[
+				field(_('Protocol Selection'), protoSel, protoCtl.help),
+				regionBox,
+				field(_('DNS servers'), dnsCtl.node, dnsCtl.help),
+				field(_('Packet size (MTU)'), mtuCtl.node, mtuCtl.help),
+				field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : _('Recommended to send all traffic via PIA.')),
+				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
+				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
+					_('The zones whose traffic may go through this VPN.')),
+				field(_('PIA DNS Server'), strictCb, _('Recommended to prevent DNS leakage')),
+				err,
+				E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ' ].concat(buttons))
+			]));
 	},
 
 	// ---- log ------------------------------------------------------------------------
