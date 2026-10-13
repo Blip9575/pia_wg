@@ -306,7 +306,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-section-descr' }, _('PIA credentials.')),
 			field(_('User ID'), idIn, _('Starts with a p followed by digits.')),
 			field(_('Password'), pwIn),
-			field(_('Cache Path'), pathIn, _('Recommend external flash drive. Storage used for server list and tokens.')),
+			field(_('Cache Path'), pathIn, _('Recommend external flash drive for servers list and token')),
 			row(_('Login Status'), loginStatus),
 			row('', E('button', { 'class': 'cbi-button cbi-button-save', 'click': ui.createHandlerFn(this, save) }, _('Save and log in'))),
 			row(_('VPN Token valid till'), tokenStatus),
@@ -424,7 +424,7 @@ return view.extend({
 					this.tbody
 				])
 			]),
-			E('div', { 'class': 'cbi-page-actions', 'style': 'text-align:right' }, [ this.addBtn ])
+			E('div', { 'class': 'cbi-page-actions', 'style': 'display:flex;justify-content:flex-end;text-align:right' }, [ this.addBtn ])
 		]);
 	},
 
