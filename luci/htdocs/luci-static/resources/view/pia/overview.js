@@ -91,6 +91,21 @@ function ago(s) {
 	return _('%d h ago').format(Math.round(s / 3600));
 }
 
+function pad2(n) {
+	return String(n).padStart(2, '0');
+}
+
+// seconds since the epoch -> 2026/10/13 and 20:27:55, in UTC
+function utcDate(t) {
+	const d = new Date(t * 1000);
+	return '%d/%s/%s'.format(d.getUTCFullYear(), pad2(d.getUTCMonth() + 1), pad2(d.getUTCDate()));
+}
+
+function utcTime(t) {
+	const d = new Date(t * 1000);
+	return '%s:%s:%s'.format(pad2(d.getUTCHours()), pad2(d.getUTCMinutes()), pad2(d.getUTCSeconds()));
+}
+
 function fail(res) {
 	ui.addNotification(null, E('p', (res && res.error) ? res.error : _('The request failed')), 'danger');
 	return false;
@@ -234,13 +249,13 @@ return view.extend({
 		let loginStatus = _('No account is configured yet.');
 		if (have)
 			loginStatus = loggedIn ? _('Logged in') : _('Not logged in');
-		const stamp = t => new Date(t * 1000).toLocaleString('en-GB');
+		// all times in UTC, year/month/day (PIA's tokens expire at 00:00 UTC, so only the date is shown)
 		let tokenStatus = _('No token');
 		if (have && acc.vpn_expires)
-			tokenStatus = stamp(acc.vpn_expires) + (acc.vpn_expires > st.now ? '' : ' ' + _('(expired: log in again)'));
+			tokenStatus = utcDate(acc.vpn_expires) + (acc.vpn_expires > st.now ? '' : ' ' + _('(expired: log in again)'));
 
 		const cacheLine = c.regions
-			? '%s (%d regions · %d meta servers)'.format(when ? stamp(when) : _('never'), c.regions, c.meta || 0)
+			? '%s (%d regions · %d meta servers)'.format(when ? utcDate(when) + ' ' + utcTime(when) + ' UTC' : _('never'), c.regions, c.meta || 0)
 			: _('No servers list yet');
 		const cacheWarn = [];
 		if (c.regions && when && st.now - when > 3 * 86400)

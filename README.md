@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.6.4 (upstream 1.0.16)
+1.6.5 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -119,7 +119,7 @@ config interface 'vpn_pia'
 
 ## Web interface (LuCI)
 `pia_wg.sh luci install` adds **Services > PIA VPN** to LuCI (the files are in the `luci/` directory of the repository: a view, a menu entry, an ACL and an rpcd plugin that calls the script's `api` commands; `luci remove` removes them; log in to LuCI again afterwards). It uses LuCI's own widgets, so it follows the theme, including its dark mode.
-  - **Account**: *User ID*, *Password* (write-only) and *Cache Path* (default `/mnt/usb/pia`, the cache files are copied when it changes), then *Login Status*, *Save and log in*, *VPN Token valid till*, *Cache Renewed* (when it was last checked, regions, meta servers; warnings if it is old, kept in RAM or has no refresh cron) and *Refresh server list & VPN token*. *Save and log in* writes to flash only when the ID, password or path changed, logs in again, refreshes the servers and tokens, and opens *Add interface* when no interface exists yet. Times are shown as day/month/year.
+  - **Account**: *User ID*, *Password* (write-only) and *Cache Path* (default `/mnt/usb/pia`, the cache files are copied when it changes), then *Login Status*, *Save and log in*, *VPN Token valid till*, *Cache Renewed* (when it was last checked, regions, meta servers; warnings if it is old, kept in RAM or has no refresh cron) and *Refresh server list & VPN token*. *Save and log in* writes to flash only when the ID, password or path changed, logs in again, refreshes the servers and tokens, and opens *Add interface* when no interface exists yet. Times are shown in UTC as year/month/day (the token expiry as a date: PIA's tokens expire at 00:00 UTC).
   - **Interfaces**: one row per interface with its region, protocol, settings and state (handshake age, endpoint), and Start, Stop, Restart, Edit and Remove. **Add interface…** (below the table) opens the same dialog as Edit: name, protocol (AmneziaWG, WireGuard or automatic), region (physical VPN locations only, streaming/port forwarding filters, VPN location (nothing chosen until you pick one), fastest region, region), packet size (default, optimal, small or custom: digits only, 1280 to 1440), keepalive (default 25, disabled or custom: 1 to 65535), DNS servers (PIA, PIA with MACE or custom: an IPv4 address; the PIA address follows the region), default route, firewall zone and forwardings, all on one page; the region list follows the chosen protocol. Saving keeps dnsmasq's strict order in step with the default route (set while a PIA interface has it, removed when none does). It offers to start the new interface.
   - Start, restart, stop and logins run in the background (the page follows the output); a change of settings applies at the next start or restart.
   - What it cannot do (use `configure` on the command line): a dedicated IP, renaming.
