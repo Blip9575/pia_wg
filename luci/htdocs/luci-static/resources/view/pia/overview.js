@@ -12,7 +12,7 @@
 
 const callStatus = rpc.declare({ object: 'luci.pia', method: 'status' });
 const callRegions = rpc.declare({ object: 'luci.pia', method: 'regions', params: [ 'proto' ] });
-const callAccount = rpc.declare({ object: 'luci.pia', method: 'account', params: [ 'id', 'password' ] });
+const callAccount = rpc.declare({ object: 'luci.pia', method: 'account', params: { id: 1, password: 1, path: 1 } });
 const callAction = rpc.declare({ object: 'luci.pia', method: 'action', params: [ 'name', 'op' ] });
 const callGlobal = rpc.declare({ object: 'luci.pia', method: 'global_action', params: [ 'op' ] });
 const callJob = rpc.declare({ object: 'luci.pia', method: 'job_status', params: [ 'name' ] });
@@ -200,14 +200,17 @@ return view.extend({
 				if (job) out.textContent = (job.output || []).join('\n');
 			}).then(job => {
 				const ok = job && job.state == 'done' && job.rc === 0;
-				ui.showModal(title, [
-					E('p', ok ? _('Done.') : _('Finished with errors (see below and the log).')),
-					E('pre', { 'style': 'max-height:14em;overflow:auto' }, ((job && job.output) || []).join('\n')),
-					E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.hideModal }, _('Close')) ])
-				]);
-				this.refresh();
-				this.loadLog();
-				if (after) after(ok);
+				// after() may take over the window (a promise or value of true)
+				return Promise.resolve(after ? after(ok) : null).then(handled => {
+					if (handled !== true)
+						ui.showModal(title, [
+							E('p', ok ? _('Done.') : _('Finished with errors (see below and the log).')),
+							E('pre', { 'style': 'max-height:14em;overflow:auto' }, ((job && job.output) || []).join('\n')),
+							E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.hideModal }, _('Close')) ])
+						]);
+					this.refresh();
+					this.loadLog();
+				});
 			});
 		});
 	},
@@ -221,27 +224,26 @@ return view.extend({
 			'class': 'cbi-input-password', 'type': 'password', 'autocomplete': 'new-password',
 			'placeholder': acc.password_set ? _('(unchanged)') : ''
 		});
-		let status = _('No account is configured yet.');
-
-		if (acc.id && acc.password_set) {
-			if (acc.vpn_expires) {
-				const days = Math.floor((acc.vpn_expires - st.now) / 86400);
-				status = days > 0 ? _('Logged in; the VPN token is valid for %d more days (renewed automatically).').format(days)
-					: _('The VPN token has expired: log in again.');
-			}
-			else {
-				status = _('Account saved; not logged in yet.');
-			}
-		}
-
-		// the offline cache: servers list, verified meta servers, refresh job
+		const pathIn = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': (st.cache && st.cache.path) || '/mnt/usb/pia',
+			'spellcheck': 'false', 'autocomplete': 'off' });
+		const have = !!(acc.id && acc.password_set);
 		const c = st.cache || {};
 		const when = c.checked || c.updated;
-		const cacheLine = [ E('span', c.regions
-			? _('%d regions, checked %s').format(c.regions, ago(when ? st.now - when : null))
-			: _('no servers list yet')) ];
-		if (st.probe && st.probe.state == 'running')
-			cacheLine.push(E('small', ' · ' + _('checking which regions need the legacy token…')));
+		const loggedIn = have && acc.vpn_expires && acc.vpn_expires > st.now;
+
+		let loginStatus = _('No account is configured yet.');
+		if (have)
+			loginStatus = loggedIn ? _('Logged in') : _('Not logged in');
+		let tokenStatus = _('No token');
+		if (have && acc.vpn_expires) {
+			const days = Math.floor((acc.vpn_expires - st.now) / 86400);
+			tokenStatus = days > 0 ? _('The VPN token is valid for %d more days (renewed automatically).').format(days)
+				: _('The VPN token has expired: log in again.');
+		}
+
+		const cacheLine = c.regions
+			? '%s (%d regions · %d meta servers)'.format(when ? new Date(when * 1000).toLocaleString() : _('never'), c.regions, c.meta || 0)
+			: _('No servers list yet');
 		const cacheWarn = [];
 		if (c.regions && when && st.now - when > 3 * 86400)
 			cacheWarn.push(_('the list has not been refreshed for over 3 days'));
@@ -249,47 +251,63 @@ return view.extend({
 			cacheWarn.push(_('kept in RAM: lost at a reboot (the cache drive is not mounted)'));
 		if (!c.cron)
 			cacheWarn.push(_('no automatic refresh is installed'));
-		cacheLine.push(E('small', ' · ' + _('%d verified meta servers').format(c.meta || 0)
-			+ (c.dir ? ' · ' + c.dir : '') + (c.cron ? ' · ' + _('refreshed every 6 hours') : '')));
+		const cacheNote = [];
+		if (st.probe && st.probe.state == 'running')
+			cacheNote.push(E('div', { 'class': 'cbi-value-description' }, _('checking which regions need the legacy token…')));
+		if (cacheWarn.length)
+			cacheNote.push(E('div', { 'class': 'cbi-value-description', 'style': 'color:#d97706' }, '⚠ ' + cacheWarn.join('; ')));
+
+		// login, then the servers and tokens, then (nothing configured yet) the Add interface dialog
+		const loginAndRefresh = () => this.runJob(_('Logging in to PIA'), '_global', () => callGlobal('login'), ok => {
+			if (!ok) return false;
+			this.runJob(_('Refreshing the servers and tokens'), '_global', () => callGlobal('refresh_cache'), () =>
+				this.refresh().then(() => {
+					if (this.st.interfaces.length || !(this.st.cache && this.st.cache.regions)) return false;
+					this.openForm(null);
+					return true;
+				}));
+			return true;
+		});
 
 		const save = () => {
-			const id = idIn.value.trim(), pw = pwIn.value;
+			const id = idIn.value.trim(), pw = pwIn.value, path = pathIn.value.trim() || '/mnt/usb/pia';
 			if (!id || (!pw && !acc.password_set))
-				return fail({ error: _('Enter the PIA user id (p1234567) and the password') });
-			const first = pw ? callAccount(id, pw) : Promise.resolve({ ok: true });
+				return fail({ error: _('Enter the PIA user ID (p1234567) and the password') });
 			if (!pw && id != acc.id)
-				return fail({ error: _('Enter the password with the new user id') });
+				return fail({ error: _('Enter the password with the new user ID') });
+			// written to flash only when something changed
+			const changed = pw || id != acc.id || path != ((st.cache && st.cache.path) || '/mnt/usb/pia');
+			const first = changed ? callAccount({ id: id, password: pw, path: path }) : Promise.resolve({ ok: true });
 			return first.then(r => {
 				if (!r || !r.ok) return fail(r);
 				pwIn.value = '';
-				return this.runJob(_('Logging in to PIA'), '_global', () => callGlobal('login'));
+				return loginAndRefresh();
 			});
 		};
+
+		const row = (title, ...content) => E('div', { 'class': 'cbi-value' }, [ E('label', { 'class': 'cbi-value-title' }, title),
+			E('div', { 'class': 'cbi-value-field' }, content) ]);
 
 		return E('div', { 'class': 'cbi-section' }, [
 			E('h3', _('Account')),
 			E('div', { 'class': 'cbi-section-descr' }, _('The PIA subscription login. It is kept on this router only and used to obtain the tokens the VPN servers accept.')),
-			field(_('User id'), idIn, _('Starts with a p followed by digits.')),
+			field(_('User ID'), idIn, _('Starts with a p followed by digits.')),
 			field(_('Password'), pwIn),
-			E('div', { 'class': 'cbi-value' }, [ E('label', { 'class': 'cbi-value-title' }, _('Status')),
-				E('div', { 'class': 'cbi-value-field' }, status) ]),
-			E('div', { 'class': 'cbi-value' }, [ E('label', { 'class': 'cbi-value-title' }, _('Cache')),
-				E('div', { 'class': 'cbi-value-field' }, [ E('div', cacheLine) ].concat(cacheWarn.length
-					? [ E('div', { 'class': 'cbi-value-description', 'style': 'color:#d97706' }, '⚠ ' + cacheWarn.join('; ')) ] : [])) ]),
-			E('div', { 'class': 'cbi-page-actions' }, [
-				E('button', { 'class': 'cbi-button cbi-button-save', 'click': ui.createHandlerFn(this, save) }, _('Save and log in')),
-				' ',
-				E('button', {
-					'class': 'cbi-button cbi-button-action',
-					'disabled': (acc.id && acc.password_set) ? null : '',
-					'click': ui.createHandlerFn(this, () => this.runJob(_('Logging in to PIA'), '_global', () => callGlobal('login')))
-				}, _('Renew login')),
-				' ',
-				E('button', {
+			field(_('Cache Path'), pathIn, _('Folder for the servers list and tokens cache. Use external storage to spare the router flash; kept in RAM while the drive is not mounted.')),
+			row(_('Login Status'), loginStatus),
+			row('', E('button', { 'class': 'cbi-button cbi-button-save', 'click': ui.createHandlerFn(this, save) }, _('Save and log in'))),
+			row(_('Token Status'), tokenStatus),
+			row(_('Cache Status'), E('div', cacheLine), ...cacheNote),
+			row('', E('button', {
 					'class': 'cbi-button cbi-button-action',
 					'click': ui.createHandlerFn(this, () => this.runJob(_('Refreshing the server list'), '_global', () => callGlobal('refresh_cache')))
-				}, _('Refresh servers and tokens'))
-			])
+				}, _('Refresh servers and tokens')), ' ',
+				E('button', {
+					'class': 'cbi-button cbi-button-add',
+					'disabled': have ? null : '',
+					'title': have ? null : _('Save the account first'),
+					'click': ui.createHandlerFn(this, () => this.openForm(null))
+				}, _('Add interface…')))
 		]);
 	},
 
@@ -393,14 +411,6 @@ return view.extend({
 					])),
 					this.tbody
 				])
-			]),
-			E('div', { 'class': 'cbi-page-actions' }, [
-				E('button', {
-					'class': 'cbi-button cbi-button-add',
-					'disabled': (this.st.account.id && this.st.account.password_set) ? null : '',
-					'title': (this.st.account.id && this.st.account.password_set) ? null : _('Save the account first'),
-					'click': ui.createHandlerFn(this, () => this.openForm(null))
-				}, _('Add interface…'))
 			])
 		]);
 	},
@@ -410,7 +420,7 @@ return view.extend({
 		dom.content(this.tbody, this.renderRows());
 		// the account part is redrawn only when its state changed (not while typing)
 		const a = this.st.account, c = this.st.cache || {},
-			sig = [ a.id, a.password_set, a.vpn_expires, c.regions, c.checked, c.updated, c.meta, c.ram, c.cron ].join('|');
+			sig = [ a.id, a.password_set, a.vpn_expires, c.regions, c.checked, c.updated, c.meta, c.ram, c.cron, c.path ].join('|');
 		if (this.accountBox && sig != this.accSig) {
 			this.accSig = sig;
 			dom.content(this.accountBox, this.renderAccount());
@@ -655,7 +665,7 @@ return view.extend({
 			E('h3', _('Log')),
 			this.logBox,
 			E('div', { 'class': 'cbi-page-actions' }, [
-				E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, () => this.loadLog()) }, _('Reload'))
+				E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, () => this.loadLog()) }, _('Refresh log'))
 			])
 		]);
 	},
@@ -665,7 +675,7 @@ return view.extend({
 	render: function(st) {
 		this.st = st;
 		const a = st.account, c = st.cache || {};
-		this.accSig = [ a.id, a.password_set, a.vpn_expires, c.regions, c.checked, c.updated, c.meta, c.ram, c.cron ].join('|');
+		this.accSig = [ a.id, a.password_set, a.vpn_expires, c.regions, c.checked, c.updated, c.meta, c.ram, c.cron, c.path ].join('|');
 		this.accountBox = E('div', {}, [ this.renderAccount() ]);
 		const page = E('div', {}, [
 			E('h2', _('PIA VPN')),

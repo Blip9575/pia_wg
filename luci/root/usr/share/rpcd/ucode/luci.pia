@@ -73,12 +73,12 @@ const methods = {
 	},
 
 	account: {
-		args: { id: 'id', password: 'password' },
+		args: { id: 'id', password: 'password', path: 'path' },
 		call: function(request) {
-			let id = request.args.id, pw = request.args.password;
-			if (!id || !pw || match(id, /[\r\n]/) || match(pw, /[\r\n]/))
-				return { ok: false, error: 'User id and password are both needed' };
-			return run([ 'api', 'account' ], id + '\n' + pw + '\n');
+			let id = request.args.id, pw = request.args.password ?? '', path = request.args.path ?? '';
+			if (!id || match(id, /[\r\n]/) || match(pw, /[\r\n]/) || match(path, /[\r\n]/))
+				return { ok: false, error: 'The user ID is needed' };
+			return run([ 'api', 'account' ], id + '\n' + pw + '\n' + path + '\n');
 		}
 	},
 
