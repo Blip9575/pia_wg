@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.6.2
+# Version: 1.6.3
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2854,6 +2854,19 @@ luci_reload() {
 
 # Install the web interface: from the luci/ directory next to the script if
 # there is one, else downloaded from the repository the script comes from
+# The unattended jobs a deployment needs (cache refresh and renew, as cron
+# entries, plus the ifup hook): installed when missing; a watchdog in use is
+# left in place
+jobs_deploy() {
+  cache_installed || {
+    cache_install && echo "Cache refresh (cron) installed"
+  }
+  watchdog_installed || renew_installed || {
+    renew_install && echo "Renew (cron, ifup hook) installed"
+  }
+  return 0
+}
+
 luci_install() {
   LIBASE="${SCRIPTDL%/*}/luci"
   LILOCAL="${SCRIPTPATH%/*}/luci"
@@ -2888,6 +2901,7 @@ luci_install() {
   done
   rm -rf "$LITMP"
   luci_reload
+  jobs_deploy
   echo "LuCI app installed: Services > PIA VPN (log in to LuCI again)"
 }
 
@@ -3068,7 +3082,7 @@ api_status() {
     --arg small "$PIA_MTU_SMALL" --arg optimal "$PIA_MTU_OPTIMAL" \
     --arg dns "$PIA_DNS" --arg dnsso "$PIA_DNS_SO" --arg dnsmace "$PIA_DNS_MACE" --arg dnssomace "$PIA_DNS_SO_MACE" \
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
-    --arg cdir "$ACD" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
+    --arg cdir "$ACD" --arg cpath "$(uci -q get pia.cache.dir || echo "$CACHEDEFDIR")" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
     --argjson job "$(api_job_json _global)" --argjson probe "$(api_job_json _probe)" \
     '{version: $version, awg: ($awg == 1), strict_dns: ($strict == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
@@ -3076,7 +3090,7 @@ api_status() {
       std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), optimal_mtu: ($optimal | tonumber),
       dns_servers: {standard: $dns, streaming: $dnsso, mace: $dnsmace, streaming_mace: $dnssomace},
       cache: {regions: $regions, updated: ($listts | tonumber? // 0), checked: ($checked | tonumber? // 0),
-              dir: $cdir, ram: ($cram == 1), cron: ($ccron == 1), meta: ($cmeta | tonumber? // 0)},
+              dir: $cdir, path: $cpath, ram: ($cram == 1), cron: ($ccron == 1), meta: ($cmeta | tonumber? // 0)},
       job: $job, probe: $probe, now: (now | floor), interfaces: .}'
 }
 
@@ -3100,11 +3114,45 @@ api_regions() {
 api_account() {
   read -r AAID
   read -r AAPW
-  [ -n "$AAID" ] && [ -n "$AAPW" ] || api_fail "User id and password are both needed"
-  uci -q set pia.account=account
-  uci -q set "pia.account.id=$AAID"
-  uci -q set "pia.account.password=$AAPW"
-  uci -q commit pia
+  read -r AAPATH || AAPATH=''
+  [ -n "$AAID" ] || api_fail "The user ID is needed"
+  # no password given: the stored one is kept
+  if [ -z "$AAPW" ]; then
+    uci -q get pia.account.password >/dev/null || api_fail "User ID and password are both needed"
+    [ "$AAID" = "$(uci -q get pia.account.id)" ] || api_fail "Enter the password with the new user ID"
+  fi
+  if [ -n "$AAPATH" ]; then
+    case "$AAPATH" in /*) ;; *) api_fail "The cache path must be absolute" ;; esac
+    case "$AAPATH" in *[!A-Za-z0-9_./-]* | *..*) api_fail "The cache path may hold letters, digits and _ . / - only" ;; esac
+    AAPATH="$(echo "$AAPATH" | sed 's#//*#/#g; s#\(.\)/$#\1#')"
+  fi
+  AACH=''
+  uci -q get pia.account >/dev/null || uci -q set pia.account=account
+  [ "$AAID" = "$(uci -q get pia.account.id)" ] || {
+    uci -q set "pia.account.id=$AAID"
+    AACH=1
+  }
+  [ -z "$AAPW" ] || [ "$AAPW" = "$(uci -q get pia.account.password)" ] || {
+    uci -q set "pia.account.password=$AAPW"
+    AACH=1
+  }
+  # the cache folder: its files are copied over (the old ones stay where they are)
+  AAOLD=''
+  if [ -n "$AAPATH" ] && [ "$AAPATH" != "$(uci -q get pia.cache.dir || echo "$CACHEDEFDIR")" ]; then
+    AAOLD="$(cache_dir)"
+    uci -q get pia.cache >/dev/null || uci -q set pia.cache=cache
+    uci -q set "pia.cache.dir=$AAPATH"
+    AACH=1
+  fi
+  [ -z "$AACH" ] || uci -q commit pia
+  if [ -n "$AAOLD" ]; then
+    AANEW="$(cache_dir)"
+    if [ "$AANEW" != "$AAOLD" ]; then
+      for AAF in servers.json servers.checked meta.list legacy.list ca.rsa.4096.crt; do
+        [ -e "$AAOLD/$AAF" ] && [ ! -e "$AANEW/$AAF" ] && cp -p "$AAOLD/$AAF" "$AANEW/$AAF"
+      done
+    fi
+  fi
   api_ok
 }
 
@@ -3204,6 +3252,8 @@ api_iface_save() {
     done
   fi
   lock_take "api iface-save"
+  AFIRST=''
+  [ -n "$(iface_list)" ] || AFIRST=1
   AWNEW=''
   iface_exists "$AN" || AWNEW=1
   PIAWG_IF="$AN"
@@ -3328,6 +3378,8 @@ api_iface_save() {
   esac
   # dnsmasq: strict order follows the default route
   [ "$A_STRICT" = 'no' ] || strict_sync >/dev/null
+  # the first interface of a router that was deployed without the cron jobs
+  [ -z "$AFIRST" ] || jobs_deploy >/dev/null 2>&1
   # a new region: check in the background which of its country's regions need
   # the legacy token (the next start waits for it instead of being refused)
   if [ -n "$A_REGION" ]; then
@@ -3435,7 +3487,25 @@ elif [ "$AUTO" ]; then
   # the write end or it would never see the end of the input.
   exec 3<>"$FIFO"
   exec 4<"$FIFO"
-  awk -v lf="$PIALOG" -v date="$(date)" '{print; printf("[%s] %s\n",date,$0) >> lf}' <&4 3>&- 4<&- >&2 &
+  # also to the system log (logread), like dqm: tag pia[PID], daemon facility,
+  # lines prefixed "PIA: [interface] "; a line is sent once per run
+  SYSLOGOK=''
+  command -v logger >/dev/null 2>&1 && SYSLOGOK=1
+  SLIF=''
+  case "$1" in
+  start | stop | restart | status | renew | init-network) [ -n "$PIAWG_IF" ] && SLIF="[$PIAWG_IF] " ;;
+  esac
+  awk -v lf="$PIALOG" -v date="$(date)" -v tag="pia[$$]" -v pre="PIA: $SLIF" -v sl="$SYSLOGOK" '
+    {print; printf("[%s] %s\n",date,$0) >> lf}
+    sl && NF && !($0 in seen) {
+      seen[$0]
+      m = $0
+      sub(/^[ \t]+/, "", m)
+      lvl = "notice"
+      if (m ~ /^(Error|FATAL)/) lvl = "err"
+      else if (m ~ /(fail|FAIL|refused|giving up|NOK|NONE|NOT |not updated)/) lvl = "warning"
+      print pre m | ("logger -t \"" tag "\" -p daemon." lvl)
+    }' <&4 3>&- 4<&- >&2 &
   exec 4<&-
 else
   exec 3>&2
