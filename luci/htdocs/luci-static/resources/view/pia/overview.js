@@ -234,15 +234,13 @@ return view.extend({
 		let loginStatus = _('No account is configured yet.');
 		if (have)
 			loginStatus = loggedIn ? _('Logged in') : _('Not logged in');
+		const stamp = t => new Date(t * 1000).toLocaleString('en-GB');
 		let tokenStatus = _('No token');
-		if (have && acc.vpn_expires) {
-			const days = Math.floor((acc.vpn_expires - st.now) / 86400);
-			tokenStatus = days > 0 ? _('The VPN token is valid for %d more days (renewed automatically).').format(days)
-				: _('The VPN token has expired: log in again.');
-		}
+		if (have && acc.vpn_expires)
+			tokenStatus = stamp(acc.vpn_expires) + (acc.vpn_expires > st.now ? '' : ' ' + _('(expired: log in again)'));
 
 		const cacheLine = c.regions
-			? '%s (%d regions · %d meta servers)'.format(when ? new Date(when * 1000).toLocaleString() : _('never'), c.regions, c.meta || 0)
+			? '%s (%d regions · %d meta servers)'.format(when ? stamp(when) : _('never'), c.regions, c.meta || 0)
 			: _('No servers list yet');
 		const cacheWarn = [];
 		if (c.regions && when && st.now - when > 3 * 86400)
@@ -260,7 +258,7 @@ return view.extend({
 		// login, then the servers and tokens, then (nothing configured yet) the Add interface dialog
 		const loginAndRefresh = () => this.runJob(_('Logging in to PIA'), '_global', () => callGlobal('login'), ok => {
 			if (!ok) return false;
-			this.runJob(_('Refreshing the servers and tokens'), '_global', () => callGlobal('refresh_cache'), () =>
+			this.runJob(_('Refreshing the server list & VPN token'), '_global', () => callGlobal('refresh_cache'), () =>
 				this.refresh().then(() => {
 					if (this.st.interfaces.length || !(this.st.cache && this.st.cache.regions)) return false;
 					this.openForm(null);
@@ -290,24 +288,18 @@ return view.extend({
 
 		return E('div', { 'class': 'cbi-section' }, [
 			E('h3', _('Account')),
-			E('div', { 'class': 'cbi-section-descr' }, _('The PIA subscription login. It is kept on this router only and used to obtain the tokens the VPN servers accept.')),
+			E('div', { 'class': 'cbi-section-descr' }, _('PIA credentials.')),
 			field(_('User ID'), idIn, _('Starts with a p followed by digits.')),
 			field(_('Password'), pwIn),
-			field(_('Cache Path'), pathIn, _('Folder for the servers list and tokens cache. Use external storage to spare the router flash; kept in RAM while the drive is not mounted.')),
+			field(_('Cache Path'), pathIn, _('Recommend external flash drive. Storage used for server list and tokens.')),
 			row(_('Login Status'), loginStatus),
 			row('', E('button', { 'class': 'cbi-button cbi-button-save', 'click': ui.createHandlerFn(this, save) }, _('Save and log in'))),
-			row(_('Token Status'), tokenStatus),
-			row(_('Cache Status'), E('div', cacheLine), ...cacheNote),
+			row(_('VPN Token valid till'), tokenStatus),
+			row(_('Cache Renewed'), E('div', cacheLine), ...cacheNote),
 			row('', E('button', {
 					'class': 'cbi-button cbi-button-action',
-					'click': ui.createHandlerFn(this, () => this.runJob(_('Refreshing the server list'), '_global', () => callGlobal('refresh_cache')))
-				}, _('Refresh servers and tokens')), ' ',
-				E('button', {
-					'class': 'cbi-button cbi-button-add',
-					'disabled': have ? null : '',
-					'title': have ? null : _('Save the account first'),
-					'click': ui.createHandlerFn(this, () => this.openForm(null))
-				}, _('Add interface…')))
+					'click': ui.createHandlerFn(this, () => this.runJob(_('Refreshing the server list & VPN token'), '_global', () => callGlobal('refresh_cache')))
+				}, _('Refresh server list & VPN token')))
 		]);
 	},
 
@@ -397,6 +389,11 @@ return view.extend({
 
 	renderInterfaces: function() {
 		this.tbody = E('tbody', {}, this.renderRows());
+		this.addBtn = E('button', {
+			'class': 'cbi-button cbi-button-add',
+			'click': ui.createHandlerFn(this, () => this.openForm(null))
+		}, _('Add interface…'));
+		this.syncAddBtn();
 		const unavailable = !this.st.awg;
 		return E('div', { 'class': 'cbi-section' }, [
 			E('h3', _('Interfaces')),
@@ -411,13 +408,22 @@ return view.extend({
 					])),
 					this.tbody
 				])
-			])
+			]),
+			E('div', { 'class': 'cbi-page-actions', 'style': 'text-align:right' }, [ this.addBtn ])
 		]);
+	},
+
+	// Add interface needs an account; kept in step with the status at every poll
+	syncAddBtn: function() {
+		const have = !!(this.st.account.id && this.st.account.password_set);
+		this.addBtn.disabled = !have;
+		this.addBtn.title = have ? '' : _('Save the account first');
 	},
 
 	update: function() {
 		if (!this.tbody) return;
 		dom.content(this.tbody, this.renderRows());
+		this.syncAddBtn();
 		// the account part is redrawn only when its state changed (not while typing)
 		const a = this.st.account, c = this.st.cache || {},
 			sig = [ a.id, a.password_set, a.vpn_expires, c.regions, c.checked, c.updated, c.meta, c.ram, c.cron, c.path ].join('|');
