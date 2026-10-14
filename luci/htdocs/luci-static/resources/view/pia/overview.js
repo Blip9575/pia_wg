@@ -24,7 +24,7 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, boot: 1 }
 });
 function callSave(args) {
 	const o = {};
@@ -575,6 +575,7 @@ return view.extend({
 			routeCb.checked = !adding && i.default_route;
 		}
 		const fwCb = checkbox(adding ? true : i.firewall);
+		const bootCb = checkbox(adding ? false : i.boot);
 		const zones = st.zones.filter(z => (adding || z != i.name) && !/^Block-/.test(z));
 		const fwd = adding ? (st.lan_zone ? [ st.lan_zone ] : []) : i.forward;
 		const boxes = zones.map(z => [ z, checkbox(fwd.indexOf(z) >= 0) ]);
@@ -627,7 +628,8 @@ return view.extend({
 				keepalive: keepCtl.node.value == 'custom' ? keepInp.value : keepCtl.node.value,
 				route: routeCb.disabled ? null : (routeCb.checked ? 'yes' : 'no'),
 				firewall: fwCb.checked ? 'yes' : 'no',
-				forward: fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null
+				forward: fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
+				boot: bootCb.checked ? 'yes' : 'no'
 			}).then(r => {
 				ui.hideModal();
 				if (!r || !r.ok) return fail(r);
@@ -666,6 +668,7 @@ return view.extend({
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('The zones whose traffic may go through this VPN.')),
+				field(_('Bring up on boot'), bootCb, _('Enable to connect on boot')),
 				err,
 				E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ' ].concat(buttons))
 			]));

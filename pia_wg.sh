@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.6.10
+# Version: 1.6.11
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2104,7 +2104,7 @@ persist_batch() {
   echo "set network.$PIAWG_IF=interface"
   echo "set network.$PIAWG_PEER=${PIAPROTO}_${PIAWG_IF}"
   # (the session options are RAM only: any left in the file are old)
-  for PBK in private_key proto defaultroute delegate dns_metric dns mace mtu metric multipath addresses \
+  for PBK in private_key proto defaultroute delegate dns_metric dns mace mtu metric multipath addresses auto \
     awg_jc awg_jmin awg_jmax awg_s1 awg_s2 awg_h1 awg_h2 awg_h3 awg_h4; do
     echo "delete network.$PIAWG_IF.$PBK"
   done
@@ -2121,6 +2121,10 @@ persist_batch() {
   # set and a defaultroute of 1 (the default) is left out, so that saving the
   # interface there does not list changes
   echo "set network.$PIAWG_IF.multipath=off"
+  # not started by netifd at boot unless asked (iface_auto=1): something else (travelmate,
+  # the hook or the user) decides, and a tunnel started before its session is registered
+  # only runs keyless
+  [ "$(uci -q get "pia.$PIAWG_IF.iface_auto")" = '1' ] || echo "set network.$PIAWG_IF.auto=0"
   # the interface's iface_* options go to the network interface, peer_* to the peer
   uci export pia | awk -v qn="'$PIAWG_IF'" -v one="'1'" -v ni="network.$PIAWG_IF" -v np="network.$PIAWG_PEER" '
     $1=="config"{d=($2=="interface" && $3==qn); next}
@@ -2130,6 +2134,7 @@ persist_batch() {
       else if (k ~ /^peer_/) { sub(/^peer_/, "", k); t=np }
       else next
       if (t==ni && k=="defaultroute" && $3==one) next
+      if (t==ni && k=="auto") next
       if (!((t "." k) in seen)) { seen[t "." k]=1; printf("delete %s.%s\n", t, k) }
       printf("%s %s.%s=%s\n", ($1=="option" && !(t==ni && k=="dns") ? "set" : "add_list"), t, k, $3)
     }'
@@ -3144,6 +3149,7 @@ api_iface_json() {
     --arg fw "$(uci -q get "pia.$PIAWG_IF.fw_zone")" \
     --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
     --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
+    --arg boot "$(uci -q get "pia.$PIAWG_IF.iface_auto")" \
     --argjson up "$AIUP" --arg hs "$AIHS" --arg ep "$AIEP" \
     --argjson job "$(api_job_json "$PIAWG_IF")" \
     '{name: $name,
@@ -3153,7 +3159,7 @@ api_iface_json() {
       streaming: ($rdns | contains("-so.")),
       mtu: ($mtu | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
-      dip: ($dip != ""), up: $up, handshake: ($hs | tonumber? // null),
+      dip: ($dip != ""), boot: ($boot == "1"), up: $up, handshake: ($hs | tonumber? // null),
       endpoint: ($ep | if . == "" then null else . end), job: $job}'
 }
 
@@ -3307,12 +3313,12 @@ api_job() {
 #   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace|custom
 #   dns_ip=<IPv4 of a custom DNS server>  mtu=std|optimal|small|<1280-1440>
 #   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
-#   forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
+#   boot=yes|no (netifd starts it at boot)  forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
 api_iface_save() {
   AN="$1"
   shift
   valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
-  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET=''
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT=''
   for AKV in "$@"; do
     AV="${AKV#*=}"
     case "$AKV" in
@@ -3330,6 +3336,7 @@ api_iface_save() {
       A_FWDSET=1
       ;;
     strict=*) A_STRICT="$AV" ;;
+    boot=*) A_BOOT="$AV" ;;
     *) api_fail "Unknown setting '${AKV%%=*}'" ;;
     esac
   done
@@ -3343,6 +3350,7 @@ api_iface_save() {
   case "$A_ROUTE" in '' | yes | no) ;; *) api_fail "Invalid route choice" ;; esac
   case "$A_FW" in '' | yes | no) ;; *) api_fail "Invalid firewall choice" ;; esac
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
+  case "$A_BOOT" in '' | yes | no) ;; *) api_fail "Invalid boot choice" ;; esac
   case "$A_MTU" in
   '' | std | optimal | small) ;;
   *) valid_mtu "$A_MTU" || api_fail "Packet size: digits only, $PIA_MTU_MIN to $PIA_MTU_OPTIMAL" ;;
@@ -3485,6 +3493,16 @@ api_iface_save() {
     fi
     ;;
   esac
+  # started by netifd at boot (network auto); written to the flash only if it changes
+  case "$A_BOOT" in
+  yes) uci -q set "pia.$AN.iface_auto=1" ;;
+  no) uci -q set "pia.$AN.iface_auto=0" ;;
+  esac
+  if [ -n "$A_BOOT" ] || [ -n "$AWNEW" ]; then
+    uci -q commit pia
+    NETCHANGED='' SESSCHANGED=''
+    ensure_iface
+  fi
   # dnsmasq: strict order follows the default route
   [ "$A_STRICT" = 'no' ] || strict_sync >/dev/null
   # the first interface of a router that was deployed without the cron jobs
