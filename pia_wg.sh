@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.6.7
+# Version: 1.6.8
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2662,21 +2662,26 @@ wan_present() {
 
 # ---- clock: TLS (the PIA CA, the tokens' expiry) needs the right time ----
 # A router without a battery clock boots with the time of its last shutdown.
-# time_synced: 0 synchronised, 1 not (yet), 2 cannot tell. ntpd (sysntpd) counts
-# only if it is running (it may be enabled but turned off with
-# system.ntp.enabled=0); then chrony is asked.
+# time_synced: 0 synchronised, 1 not (yet), 2 cannot tell. ntpd (sysntpd) is
+# used if system.ntp.enabled is not 0 and it runs; otherwise chrony, judged
+# like dqm does: stratum 1-9 (0 and 16 are unsynchronised, 10 is chrony's own
+# local orphan reference) and a system time offset under 200 ms.
 time_synced() {
-  if pidof ntpd >/dev/null 2>&1; then
+  if [ "$(uci -q get system.ntp.enabled)" != '0' ] && pidof ntpd >/dev/null 2>&1; then
+    TSRC='ntpd'
     # OpenWrt's ntpd hotplug script leaves this file at the first stratum event
     [ -e /var/state/dnsmasqsec ] && return 0
     [ -e /etc/hotplug.d/ntp/25-dnsmasqsec ] && return 1
     return 2
   fi
-  if pidof chronyd >/dev/null 2>&1 && command -v chronyc >/dev/null 2>&1; then
-    CHT="$(chronyc -c tracking 2>/dev/null)" || return 1
-    CHREF="${CHT%%,*}"
-    CHLEAP="${CHT##*,}"
-    [ -n "$CHREF" ] && [ "$CHREF" != '00000000' ] && [ "$CHLEAP" = 'Normal' ] && return 0
+  if command -v chronyc >/dev/null 2>&1; then
+    TSRC='chrony'
+    CHT="$(chronyc tracking 2>/dev/null)"
+    [ -n "$CHT" ] || return 2
+    echo "$CHT" | awk -F: '
+      /^Stratum/ {s = $2 + 0}
+      /^System time/ {split($2, a, " "); o = a[1] + 0}
+      END {exit !(s >= 1 && s <= 9 && o < 0.2)}' && return 0
     return 1
   fi
   return 2
@@ -2688,13 +2693,13 @@ time_wait() {
   time_synced
   TWR=$?
   [ $TWR -eq 1 ] || return 0
-  echo "Waiting for the clock to synchronise (up to ${1}s)" >&3
+  echo "Waiting for the clock to synchronise (${TSRC}, up to ${1}s)" >&3
   while [ "$TWLEFT" -gt 0 ]; do
     sleep 5
     TWLEFT=$((TWLEFT - 5))
     time_synced
     [ $? -eq 1 ] || {
-      echo "The clock is synchronised" >&3
+      echo "The clock is synchronised (${TSRC})" >&3
       return 0
     }
   done
