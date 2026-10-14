@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.6.8
+# Version: 1.6.9
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2783,9 +2783,46 @@ hook_content() {
   cat <<EOF
 #!/bin/sh
 # Installed by pia_wg.sh ('renew install'): keeps the PIA session ready and
-# pins the endpoint route when the PIA interface goes up
-[ "\$ACTION" = ifup ] || [ "\$ACTION" = ifdown ] || exit 0
-/bin/sh "$SCRIPTPATH" hook "\$ACTION" "\$INTERFACE" >/dev/null 2>&1 &
+# pins the endpoint route when the PIA interface goes up.
+# One run at a time (lock directory, like the chrony hook): an event that
+# arrives meanwhile is queued and handled by the run in progress. The work is
+# done by a second process (this file with 'run'), in the background, because
+# the hotplug events are handled one at a time.
+if [ "\$1" != run ]; then
+  [ "\$ACTION" = ifup ] || exit 0
+  /bin/sh '$HOOKFILE' run "\$ACTION" "\$INTERFACE" >/dev/null 2>&1 &
+  exit 0
+fi
+EV="\$2 \$3"
+RUN='$RUNDIR'
+LOCKDIR="\$RUN/hook.lock"
+QUEUE="\$RUN/hook.queue"
+umask 077
+mkdir -p "\$RUN"
+trap 'rm -rf "\$LOCKDIR"' EXIT INT TERM HUP
+while [ -n "\$EV" ]; do
+  if ! mkdir "\$LOCKDIR" 2>/dev/null; then
+    HP="\$(cat "\$LOCKDIR/pid" 2>/dev/null)"
+    [ -n "\$HP" ] || { sleep 1; HP="\$(cat "\$LOCKDIR/pid" 2>/dev/null)"; }
+    if [ -n "\$HP" ] && kill -0 "\$HP" 2>/dev/null; then
+      echo "\$EV" >>"\$QUEUE"
+      trap - EXIT
+      exit 0
+    fi
+    rm -rf "\$LOCKDIR"
+    mkdir "\$LOCKDIR" 2>/dev/null || { trap - EXIT; exit 0; }
+  fi
+  echo \$\$ >"\$LOCKDIR/pid"
+  while [ -n "\$EV" ]; do
+    /bin/sh "$SCRIPTPATH" hook \$EV
+    EV="\$(sort -u "\$QUEUE" 2>/dev/null | head -n 1)"
+    [ -z "\$EV" ] || { grep -vxF "\$EV" "\$QUEUE" >"\$QUEUE.n"; mv "\$QUEUE.n" "\$QUEUE"; }
+  done
+  rm -rf "\$LOCKDIR"
+  # an event queued while the lock was being released
+  EV="\$(sort -u "\$QUEUE" 2>/dev/null | head -n 1)"
+  [ -z "\$EV" ] || { grep -vxF "\$EV" "\$QUEUE" >"\$QUEUE.n"; mv "\$QUEUE.n" "\$QUEUE"; }
+done
 EOF
 }
 
