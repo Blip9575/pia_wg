@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.6.9
+# Version: 1.6.10
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2695,8 +2695,8 @@ time_wait() {
   [ $TWR -eq 1 ] || return 0
   echo "Waiting for the clock to synchronise (${TSRC}, up to ${1}s)" >&3
   while [ "$TWLEFT" -gt 0 ]; do
-    sleep 5
-    TWLEFT=$((TWLEFT - 5))
+    sleep 1
+    TWLEFT=$((TWLEFT - 1))
     time_synced
     [ $? -eq 1 ] || {
       echo "The clock is synchronised (${TSRC})" >&3
