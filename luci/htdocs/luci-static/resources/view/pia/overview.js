@@ -252,7 +252,9 @@ return view.extend({
 		// all times in UTC, year/month/day (PIA's tokens expire at 00:00 UTC, so only the date is shown)
 		let tokenStatus = _('No token');
 		if (have && acc.vpn_expires)
-			tokenStatus = utcDate(acc.vpn_expires) + (acc.vpn_expires > st.now ? '' : ' ' + _('(expired: log in again)'));
+			tokenStatus = utcDate(acc.vpn_expires) + ' ' + (acc.vpn_expires > st.now
+				? (days => days == 1 ? _('(1 day)') : _('(%d days)').format(days))(Math.floor((acc.vpn_expires - st.now) / 86400))
+				: _('(expired: log in again)'));
 
 		const cacheLine = c.regions
 			? '%s (%d regions · %d meta servers)'.format(when ? utcDate(when) + ' ' + utcTime(when) + ' UTC' : _('never'), c.regions, c.meta || 0)
