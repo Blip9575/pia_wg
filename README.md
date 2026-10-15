@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.8.0 (upstream 1.0.16)
+1.9.0 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -17,7 +17,7 @@ Changes compared to upstream 1.0.16:
   - `configure region`: regions needing the legacy token are marked `(L)`, a streaming optimised filter, default answers on every yes/no question
   - Configurable interface name, a run lock, temporary files in `/var/run/pia`, log in `/var/log/pia`
   - Fixes: server list error check, connectivity check on tunnels whose first hop does not answer, `jq` without regex support, `update` refusing anything that is not a valid script
-  - The WireGuard key pair and the server settings are kept in RAM only (like the official apps), as deltas in `/var/state/network` that netifd's protocol scripts read and LuCI does not (no *unsaved changes*, nothing committed by a Save & Apply); the persistent network config is written only when it changes; `renew` (cron, ifup hook) replaces the watchdog for an ordinary `ifup`/`ifdown` managed interface, and the watchdog backs off after failed restarts
+  - The WireGuard key pair and the server settings are kept in RAM only (like the official apps), as deltas in `/var/state/network` that netifd's protocol scripts read and LuCI does not (no *unsaved changes*, nothing committed by a Save & Apply); the persistent network config is written only when it changes; `renew` (cron, ifup hook) and the guard (cron) replace the retired watchdog for an ordinary `ifup`/`ifdown` managed interface
   - One config, `/etc/config/pia` (was `pia_wg`), with a section per interface named like it: several PIA interfaces on one router (`-i NAME`), sharing the account, tokens and cache; the script, cron tags, hook, log and cache directory use `pia` names (older names are converted on the first run)
   - AmneziaWG (PIA's obfuscated WireGuard, as in the Android app) is the default protocol of a new interface: `iface_proto`, asked right after the name, `configure protocol`; the servers list is the v7 one; also at interface creation: automatic protocol (AmneziaWG, then WireGuard), MACE DNS, small packets, fastest region of the country; a 401 is retried after 5/15/30 s before the VPN token is renewed
   - A LuCI web interface (Services > PIA VPN, `luci install`): account and interfaces, added and edited in the same dialog; the script gets JSON `api` commands for it (see *Web interface*); a new region triggers a background check of its country's regions that need the legacy token (`cache probe CC`), and the interface is written the way LuCI saves it, so a save in the Network pages lists no changes
@@ -30,7 +30,7 @@ Changes compared to upstream 1.0.16:
   - Give execution permission to the script: `chmod +x pia_wg.sh`
   - Install packages which the script depends on: `opkg update && opkg install jq-full curl wireguard-tools luci-proto-wireguard coreutils-stty coreutils-nl`
   - Configure and run:
-    - To configure and run PIA, use `./pia_wg.sh start` (or `./pia_wg.sh start --watchdog` if you want the watchdog installed) and answer the questions
+    - To configure and run PIA, use `./pia_wg.sh start` (or `./pia_wg.sh start --watchdog` if you want the guard installed) and answer the questions
     - To just configure, use `./pia_wg.sh configure` and answer the questions
 <br /> Then you can setup network advanced/expert settings (see below) and then to run, use `./pia_wg.sh start` (or `./pia_wg.sh start --watchdog`)
 
@@ -50,7 +50,7 @@ For a typical setup (direct all LAN traffic to/from internet through the newly c
 - Traffic should now only be allowed through the wireguard connection
 
 ### Fail closed (what the script does not do)
-Neither the watchdog nor `renew` is a kill switch: when the tunnel is down, the default route into it disappears and traffic follows the next default route. If the LAN must never reach the internet except through PIA, make that a firewall rule rather than a routing one: the LAN zone must have **no** forwarding to the WAN zone (only to the PIA zone), as in the steps above. With no tunnel the LAN then simply has no internet. The router's own traffic (this script's calls to PIA, the cache refresh) leaves through the WAN as output, which the zone rules above do not block.
+Neither the guard nor `renew` is a kill switch: when the tunnel is down, the default route into it disappears and traffic follows the next default route. If the LAN must never reach the internet except through PIA, make that a firewall rule rather than a routing one: the LAN zone must have **no** forwarding to the WAN zone (only to the PIA zone), as in the steps above. With no tunnel the LAN then simply has no internet. The router's own traffic (this script's calls to PIA, the cache refresh) leaves through the WAN as output, which the zone rules above do not block.
 
 ## Update
 The script can be updated to the latest version using: `pia_wg.sh update` (it is downloaded from the `release` branch of this fork, and installed only if it is a valid script)
@@ -104,7 +104,7 @@ config interface 'vpn_pia'
 ```
   - `./pia_wg.sh configure interface NAME` creates one (letters, digits and underscore, 15 characters at most); `configure rename NEW` (with `-i OLD`) renames it, `configure remove NAME` forgets it (and its network sections).
   - With a single interface it is implicit. With several, `-i NAME` selects one (for example `./pia_wg.sh -i vpn_pia2 start`); `start`, `restart`, `stop`, `status`, `renew` and `init-network` without `-i` (or with `-i all`) act on each. `renew` and the ifup hook cover every interface.
-  - Each interface has its own region (or dedicated IP), session key and watchdog entry. One PIA token can hold only one peer per server, so an interface does not pick a server another interface is using; give them different regions when you can.
+  - Each interface has its own region (or dedicated IP), session key and guard check. One PIA token can hold only one peer per server, so an interface does not pick a server another interface is using; give them different regions when you can.
   - Only one interface should have the default route if they are used for the same traffic: set `peer_route_allowed_ips '0'` (or narrower allowed IPs) on the others, and adapt the firewall zones.
 
 ### When an interface is created
@@ -124,8 +124,8 @@ config interface 'vpn_pia'
   - Start, restart, stop and logins run in the background (the page follows the output); a change of settings applies at the next start or restart.
   - What it cannot do (use `configure` on the command line): a dedicated IP, renaming.
 
-## Keeping the key registered with `renew` (no watchdog)
-`./pia_wg.sh renew install` makes the VPN behave like an ordinary WireGuard interface, started and stopped with `ifup`/`ifdown` (or from LuCI), and removes the watchdog:
+## Keeping the key registered with `renew`
+`./pia_wg.sh renew install` makes the VPN behave like an ordinary WireGuard interface, started and stopped with `ifup`/`ifdown` (or from LuCI), and removes the retired watchdog:
   - `renew` (cron, every 6 hours) registers the session key again with the PIA server and renews the tokens when due. It never starts or stops the tunnel, leaves through the WAN, and does nothing while the tunnel has had a handshake in the last 3 minutes (`--force` overrides).
   - A hotplug hook (`/etc/hotplug.d/iface/80-pia`) keeps the host route of the endpoint in place (without it the first packets of an `ifup` loop through the tunnel), and prepares the session when the WAN comes up or when the PIA interface is brought up with none (after a reboot).
   - `renew --new-key` registers a new key; if the interface is up, add `--apply` to restart it with the new key.
@@ -135,18 +135,14 @@ The interface is not started at boot unless you want it: set `uci set pia.vpn_pi
 
 ### What is stored where
 Like the official apps, the script does not store the WireGuard key pair. A new pair is generated for each connection (`start`, `restart`, `renew --new-key`, or after a reboot), registered with `addKey`, and kept only in RAM together with the address and server settings that `addKey` returned (`/var/run/pia/session`). The script manages only its own options of the interface and peer sections (the others, such as `ip4table` or `ip6assign` set in LuCI, are left alone). The network config on flash only holds what never changes (interface name, protocol, MTU, DNS, allowed IPs, keepalive, a fixed placeholder key, the region description); the key, address and server are RAM-only uci deltas in `/var/state/network` (tmpfs), which the protocol handlers of netifd (`wireguard.sh`, `amneziawg.sh`) read through `config_load`. uci, rpcd and LuCI do not read that directory, so these settings are neither listed as unsaved changes nor committed by a *Save & Apply*; netifd itself does not see them either, so the script restarts a running interface (`ifdown`/`ifup`) to apply a new session. Before 1.4.0 they were staged in `/tmp/.uci`, which LuCI shows as unsaved changes; they are moved at the next renew or start. As a result:
-  - the flash is not written by `renew`, `start`, `restart` or a watchdog recovery, only when what is persistent actually changes (region, interface name, DNS); every write to `/etc/config/network` and `/etc/config/pia` is preceded by a comparison;
+  - the flash is not written by `renew`, `start`, `restart` or a recovery of the guard, only when what is persistent actually changes (region, interface name, DNS); every write to `/etc/config/network` and `/etc/config/pia` is preceded by a comparison;
   - LuCI's Network pages show the interface and its peer with the placeholder settings (no key, address or endpoint); the PIA page and the interface status show the live ones;
   - the legacy 24h token is also kept in RAM only (`/var/run/pia/legacy.token`); the v5 tokens, which last weeks, stay in `/etc/config/pia`;
   - a reboot loses the key: the hook registers a new one when the WAN is up (through the cache and the PIA servers by IP, so it also works where PIA names are blocked).
 
-## Watchdog (legacy, always on)
-The script can install a watchdog that will check regularly the status and restart the VPN if needed. It always brings the VPN back (so stopping it from LuCI is undone within a minute); for an ordinary WireGuard interface use `renew` above instead.
-<br/> After repeated failed restarts the cron run backs off (1, 2, 5 then 10 minutes) so that a dead server is not hammered.
-<br/> For that, just use `--watchdog` when using `start`or `restart`, or run the command `./pia_wg.sh watchdog install`
-<br/> The health check pings PIA's own in-tunnel DNS address (the interface's DNS server, 10.0.0.242 normally) through the tunnel; it never contacts a third-party address, and it sends no DNS query.
-<br/> The cron entries are recognised by their `# pia …` tags and written with the path the script is run from, so the script can have any name and location; after moving it, run `watchdog install` (and `cache install`) from the new location and the old entries are replaced.
-<br/> To unsinstall/remove the watchdog, use `./pia_wg.sh watchdog remove`; when `./pia_wg.sh stop` is used, the watchdog is automatically removed
+## Watchdog (retired since 1.9.0)
+The watchdog (a cron entry per interface that restarted the VPN when it was down or did not answer, so that stopping it from LuCI was undone within a minute) is retired. The [guard](#guard-since-180) mends a stale tunnel, and ifup/ifdown stays yours (LuCI, `ifup`, travelmate).
+<br/> The commands remain as aliases: `watchdog install`, `start --watchdog` and `restart --watchdog` install the guard, `watchdog remove` removes it, and `start --cron` (an old cron entry) runs the guard check. Old `# pia watchdog` cron entries are removed whenever the script sees them (`renew install`, `luci install`, `stop`, `configure remove`).
 
 ## Offline cache (networks blocking PIA)
 Like the official PIA apps, the script talks to PIA through PIA servers by IP address (meta servers for the API, WireGuard servers for `addKey`), verifying their certificate against the PIA CA, and only falls back to the PIA domain names (`privateinternetaccess.com`, `piaproxy.net`, `serverlist.piaservers.net`, `<region>.pvt.site`) when that fails. This keeps it working on networks that block the PIA domains through DNS or SNI filtering.
@@ -198,7 +194,7 @@ To also check that tokens can be obtained through meta servers, delete the store
 ## Temporary files and locking
 Temporary files (the API responses, which hold tokens, the logging pipe and downloads) are created in `/var/run/pia/`, in RAM, with mode 0700; the directory is created on demand (`/tmp/pia` is used if `/var/run` is not writable). Leftovers of runs that died are removed at the next run. The only temporary files elsewhere are the short-lived `*.tmp` files used to replace cache files atomically, which sit next to them in the cache directory.
 
-The commands that act on the tunnel, the tokens or the cache (`start`, `restart`, `stop`, `init-network`, `cache refresh`, `cache probe`) take a lock, `/var/run/pia/pia_wg.lock`, so that two runs cannot step on each other. The watchdog's `start` just skips when another run is in progress (it runs again a minute later); the other commands wait up to 2 minutes and then give up with exit status 75. A lock left by a run that died is removed, and a run still holding it after 15 minutes is considered stuck and terminated. `configure` does not take the lock, so that waiting at a prompt cannot stop the watchdog.
+The commands that act on the tunnel, the tokens or the cache (`start`, `restart`, `stop`, `init-network`, `cache refresh`, `cache probe`) take a lock, `/var/run/pia/pia_wg.lock`, so that two runs cannot step on each other. `start` just skips when another run is in progress; the other commands wait up to 2 minutes and then give up with exit status 75. A lock left by a run that died is removed, and a run still holding it after 15 minutes is considered stuck and terminated. `configure` does not take the lock, so that waiting at a prompt cannot stop the unattended jobs.
 
 ## Tunnel confirmation (since 1.7.0)
 
@@ -214,12 +210,12 @@ When stage 1 fails the script recovers up to three times: it registers the key a
 A cron job (`# pia guard`, every minute, installed with the renew job and removed with it) looks at each interface that is up. When its handshake is older than 180 seconds (a working tunnel renews it at least every 2 minutes with the keepalive on) it runs the ifup hook, which registers the key when it is missing and confirms the tunnel: a default route and DNS server that point into a dead tunnel are withdrawn first, then the recovery of the tunnel confirmation runs. The guard itself changes nothing and leaves no trace while all is well (no log file is touched). An interface whose keepalive is 0 is skipped, since an idle tunnel has no handshake then, and so is an interface that is down.
 
 ## Logging
-When the watchdog is enabled, the scripts log is located in `/var/log/pia/pia.log` (RAM on OpenWrt, so it does not wear the flash; use `./pia_wg.sh log path` to choose another directory)
+When it runs unattended, the script's log is located in `/var/log/pia/pia.log` (RAM on OpenWrt, so it does not wear the flash; use `./pia_wg.sh log path` to choose another directory)
 The log can be displayed using `pia_wg.sh log show` and cleared using `pia_wg_sh log clear`
 
 What unattended runs print (cron, the ifup hook, LuCI jobs) also goes to the system log (`logread | grep pia`), like other daemons do: tag `pia[PID]`, facility `daemon`, lines starting `PIA: ` and, for an interface, `PIA: [name] `; failures are warnings.
 
-`luci install` and the first interface made from LuCI install the cache refresh and renew cron entries when they are missing (a watchdog in use is left alone).
+`luci install` and the first interface made from LuCI install the cache refresh and renew cron entries when they are missing (and the guard; a retired watchdog's entries are removed).
 
 ## Usage
 Usage: `pia_wg.sh [ -i <interface|all> ] { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | renew [ --force | --new-key | --apply ] | renew { install | remove } | watchdog { install | remove } | cache { refresh | install | remove | show } | log { show | clear | path } | update | version}`
@@ -239,17 +235,17 @@ Usage: `pia_wg.sh [ -i <interface|all> ] { configure <section> | start [ --watch
   - `configure firewall` : firewall zone, NAT and the zones forwarded to the interface
   - `init-network`       : setup PIA WireGuard network (no start)
   - `start`              : start PIA WireGuard (if not already up)
-  - `start --watchdog`   : same as start and install the watchdog
+  - `start --watchdog`   : same as start and install the guard (the watchdog is retired)
   - `restart`            : start or restart PIA WireGuard
-  - `restart --watchdog` : same as restart and install the watchdog
+  - `restart --watchdog` : same as restart and install the guard
   - `start|restart --cache` : same and install the cache refresh
-  - `stop`               : stop PIA WireGuard (and remove the watchdog)
+  - `stop`               : stop PIA WireGuard
   - `status`             : show PIA WireGuard status
   - `renew`              : register the session key again (never starts or stops the tunnel; skipped while it is up; `--force`, `--new-key [--apply]`)
-  - `renew install`      : install the renew cron and the ifup hook, and remove the watchdog
+  - `renew install`      : install the renew cron, the guard cron and the ifup hook, and remove the retired watchdog
   - `renew remove`       : remove the renew cron and the hook
-  - `watchdog install`   : install the watchdog
-  - `watchdog remove`    : remove the watchdog
+  - `watchdog install`   : alias of the guard install
+  - `watchdog remove`    : remove the guard (and any old watchdog entry)
   - `cache refresh`      : refresh the offline cache (servers list, meta servers, tokens)
   - `cache install`      : install the cache refresh (cron, every 6 hours)
   - `cache remove`       : remove the cache refresh

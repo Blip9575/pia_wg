@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.8.0
+# Version: 1.9.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -19,7 +19,7 @@
 SCRIPTDL="https://raw.githubusercontent.com/Blip9575/pia_wg/release/pia_wg.sh"
 SCRIPTPATH="$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)/${0##*/}"
 SCRIPTNAME="${SCRIPTPATH##*/}"
-CRON_TAG_WD='# pia watchdog' # (per interface: "# pia watchdog [name]"); cron entries are recognised by these tags, not by the file name
+CRON_TAG_WD='# pia watchdog' # (retired: the guard does it; entries "# pia watchdog [name]" are removed when seen); cron entries are recognised by these tags, not by the file name
 CRON_TAG_CACHE='# pia cache'
 CRON_TAG_RENEW='# pia renew'
 CRON_TAG_GUARD='# pia guard'
@@ -154,9 +154,7 @@ set_ifvars() {
   SRVGRP='wg' # which group of the servers list holds its servers
   [ "$PIAPROTO" = 'amneziawg' ] && SRVGRP='awg'
   SESSION="$RUNDIR/session.$PIAWG_IF"
-  WDFAIL="$RUNDIR/watchdog.$PIAWG_IF.fail"
   RENEWFAIL="$RUNDIR/renew.$PIAWG_IF.fail"
-  CRON_TAG_WD="# pia watchdog [$PIAWG_IF]"
   # tunnels (ours, any other WireGuard interface): never "the WAN"
   PIAIFS=" $(iface_list | tr '\n' ' ') $PIAWG_IF $( (
     wg show interfaces
@@ -171,7 +169,7 @@ pid_is_pia() {
 }
 
 # lock_take <command...>: serialise the runs that act on the tunnel and tokens.
-# The watchdog 'start' skips when busy (it runs again in a minute); the other
+# The 'start' skips when busy (it is run again by whatever called it); the other
 # commands wait up to $LOCK_WAIT seconds, then give up (exit 75). A lock whose
 # run died is removed; one held for more than $LOCK_STEAL seconds is stuck.
 lock_take() {
@@ -1599,7 +1597,7 @@ rename_iface() {
   forget_net
   uci -q rename "pia.$PIAWG_IF=$1"
   uci -q commit pia
-  watchdog_remove
+  watchdog_strip
   rm -f "$SESSION"
   echo "Interface $PIAWG_IF is now $1 (start it again, and mind its firewall zone)"
   PIAWG_IF="$1"
@@ -1614,7 +1612,7 @@ remove_iface() {
   }
   PIAWG_IF="$1"
   set_ifvars
-  watchdog_remove
+  watchdog_strip
   ifdown "$PIAWG_IF" >/dev/null 2>&1
   forget_net
   persist_run fw_remove_inner
@@ -2636,24 +2634,6 @@ check_wg() {
 
 # ---- Watchdog back-off (cron runs only): after repeated failed restarts wait
 # longer, so that a dead server is not hammered and the config not rewritten.
-watchdog_skip() {
-  [ -s "$WDFAIL" ] || return 1
-  read -r WN WT <"$WDFAIL"
-  case "${WN:-0}" in
-  0 | 1) WD=0 ;;
-  2) WD=60 ;;
-  3) WD=120 ;;
-  4) WD=300 ;;
-  *) WD=600 ;;
-  esac
-  [ $(($(date +%s) - ${WT:-0})) -lt $WD ]
-}
-
-watchdog_failed() {
-  read -r WN _ <"$WDFAIL" 2>/dev/null
-  echo "$((${WN:-0} + 1)) $(date +%s)" >"$WDFAIL"
-}
-
 # ---- renew: keep the key registered, nothing else ----
 # It never starts or stops the tunnel: that is left to ifup/ifdown (LuCI).
 
@@ -3086,7 +3066,7 @@ hook_install() {
 
 renew_install() {
   hook_install
-  watchdog_remove
+  watchdog_strip
   guard_install
   grep -qF "/bin/sh $SCRIPTPATH renew $CRON_TAG_RENEW" /etc/crontabs/root 2>/dev/null && return 0
   {
@@ -3138,33 +3118,24 @@ hook_cmd() {
   return 0
 }
 
-watchdog_installed() {
-  grep -qF "$CRON_TAG_WD" /etc/crontabs/root 2>/dev/null
-  return $?
-}
-
-watchdog_lastrun() {
-  [ -f "$PIALOG" ] && date -r "$PIALOG" || return 1
+# The watchdog (a cron entry per interface running 'start --cron': it restarted a
+# tunnel that was down or did not answer) is retired: the guard replaces it and
+# only mends a stale tunnel (it never brings an interface up or down). Its
+# entries are removed whenever seen; the commands remain as aliases.
+watchdog_strip() {
+  grep -qF "$CRON_TAG_WD" /etc/crontabs/root 2>/dev/null || return 0
+  crontab -l | grep -vF "$CRON_TAG_WD" | crontab -
+  echo "[$(date)] Watchdog entries removed (the guard replaces them)" >>"$PIALOG"
 }
 
 watchdog_install() {
-  grep -qF "/bin/sh $SCRIPTPATH -i $PIAWG_IF start --cron $CRON_TAG_WD" /etc/crontabs/root 2>/dev/null && return
-  {
-    crontab -l 2>/dev/null | grep -vF "$CRON_TAG_WD"
-    echo "* * * * * /bin/sh $SCRIPTPATH -i $PIAWG_IF start --cron $CRON_TAG_WD"
-  } | crontab -
-  echo "[$(date)] Watchdog installed" >>"$PIALOG"
-}
-
-watchdog_remove() {
-  watchdog_installed || return
-  crontab -l | grep -vF "$CRON_TAG_WD" | crontab -
-  echo "[$(date)] Watchdog removed" >>"$PIALOG"
+  echo "The watchdog is retired: the guard (cron, every minute) replaces it" >&3
+  watchdog_strip
+  guard_install
 }
 
 log_show() {
   [ -s "$PIALOG" ] && cat "$PIALOG" || echo "Log is empty!"
-  watchdog_installed && WLR="$(watchdog_lastrun)" && echo "[$WLR] Watchdog last check"
 }
 
 log_clear() {
@@ -3221,16 +3192,17 @@ luci_reload() {
 # Install the web interface: from the luci/ directory next to the script if
 # there is one, else downloaded from the repository the script comes from
 # The unattended jobs a deployment needs (cache refresh and renew, as cron
-# entries, plus the ifup hook): installed when missing; a watchdog in use is
-# left in place
+# entries, plus the ifup hook and the guard): installed when missing; a retired
+# watchdog's entries are removed
 jobs_deploy() {
   cache_installed || {
     cache_install && echo "Cache refresh (cron) installed"
   }
-  watchdog_installed || renew_installed || {
-    renew_install && echo "Renew (cron, ifup hook) installed"
+  renew_installed || {
+    renew_install && echo "Renew (cron, ifup hook, guard) installed"
   }
   # (renew_install makes the guard too; one added to an older deployment)
+  watchdog_strip
   guard_installed || guard_install
   return 0
 }
@@ -3285,14 +3257,14 @@ install_jobs() {
   shift
   for A in "$@"; do
     case "$A" in
-    '--watchdog') watchdog_install ;;
+    '--watchdog') guard_install ;;
     '--cache') cache_install ;;
     esac
   done
 }
 
 print_usage() {
-  echo "Usage: $0 [ -i <interface|all> ] { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | renew [ --force | --new-key | --apply ] | renew { install | remove } | watchdog { install | remove } | cache { refresh | install | remove | show | probe } | log { show | clear | path } | update | version}"
+  echo "Usage: $0 [ -i <interface|all> ] { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | renew [ --force | --new-key | --apply ] | renew { install | remove } | watchdog { install | remove } (aliases of the guard) | cache { refresh | install | remove | show | probe } | log { show | clear | path } | update | version}"
   echo "  The interfaces are the sections of /etc/config/pia, named like the network interface."
   echo "  With several, -i NAME selects one (-i all or nothing: every one, for start, restart, stop, status, renew)."
   echo "  Details:"
@@ -3315,19 +3287,19 @@ print_usage() {
   echo "    - configure firewall : firewall zone, NAT and the zones forwarded to the interface"
   echo "    - init-network       : setup PIA WireGuard network (no start)"
   echo "    - start              : start PIA WireGuard (if not already up)"
-  echo "    - start --watchdog   : same as start and install the watchdog"
+  echo "    - start --watchdog   : same as start and install the guard (the watchdog is retired)"
   echo "    - restart            : start or restart PIA WireGuard"
-  echo "    - restart --watchdog : same as restart and install the watchdog"
+  echo "    - restart --watchdog : same as restart and install the guard"
   echo "    - start|restart --cache : same and install the cache refresh"
-  echo "    - stop               : stop PIA WireGuard (and remove the watchdog)"
+  echo "    - stop               : stop PIA WireGuard"
   echo "    - status             : show PIA WireGuard status"
   echo "    - renew              : register the session key again (never starts or stops the tunnel; skipped while it is up)"
   echo "    - renew --force      : register even if the tunnel is up (the key is re-added on the server)"
   echo "    - renew --new-key    : register a new key (needs --apply if the interface is up: it is restarted)"
-  echo "    - renew install      : install the renew cron (every 6 hours, all interfaces) and the ifup hook; removes the watchdogs"
+  echo "    - renew install      : install the renew cron (every 6 hours, all interfaces), the guard cron (every minute) and the ifup hook; removes the watchdogs"
   echo "    - renew remove       : remove the renew cron and the hook"
-  echo "    - watchdog install   : install the watchdog (legacy, always on; per interface)"
-  echo "    - watchdog remove    : remove the watchdog"
+  echo "    - watchdog install   : alias of the guard install (the watchdog is retired)"
+  echo "    - watchdog remove    : remove the guard (and any old watchdog entry)"
   echo "    - cache refresh      : refresh the offline cache (servers list, meta servers, tokens)"
   echo "    - cache install      : install the cache refresh (cron, every 6 hours)"
   echo "    - cache remove       : remove the cache refresh"
@@ -3926,7 +3898,7 @@ if [ -n "$MULTI" ] || [ "$SELIF" = 'all' ]; then
     ;;
   'configure' | 'watchdog')
     case "$1 $2" in
-    'configure ' | 'configure all' | 'configure region' | 'configure dip' | 'configure network' | 'configure route' | 'configure firewall' | 'configure rename' | 'watchdog install' | 'watchdog remove')
+    'configure ' | 'configure all' | 'configure region' | 'configure dip' | 'configure network' | 'configure route' | 'configure firewall' | 'configure rename')
       if [ -z "$SELIF" ] || [ "$SELIF" = 'all' ]; then
         echo "Several interfaces are configured ($(echo "$IFLIST" | tr '\n' ' ')): use -i NAME" >&2
         exit 1
@@ -4040,7 +4012,7 @@ case "$1" in
   ;;
 'watchdog') case "$2" in
   'install') watchdog_install ;;
-  'remove') watchdog_remove ;;
+  'remove') watchdog_strip && guard_remove ;;
   *)
     echo "Unknown watchdog subcommand '$2'!"
     print_usage
@@ -4095,24 +4067,16 @@ case "$1" in
   exit $R
   ;;
 'start')
+  if [ "$2" = '--cron' ]; then
+    # an entry of the retired watchdog: the guard does what is needed, the entry goes
+    watchdog_strip
+    guard_cmd
+    exit 0
+  fi
   check_wg
   case $? in
-  0)
-    rm -f "$WDFAIL"
-    echo "PIA is already up!"
-    ;;
-  1)
-    if [ "$2" = '--cron' ] && watchdog_skip; then
-      echo "Backing off after failed restarts; not trying again yet"
-      exit 0
-    fi
-    if start_wgpia; then
-      rm -f "$WDFAIL"
-    else
-      [ "$2" = '--cron' ] && watchdog_failed
-      false
-    fi
-    ;;
+  0) echo "PIA is already up!" ;;
+  1) start_wgpia ;;
   2) echo "Could not start PIA!" >&2 ;;
   esac
   R=$?
@@ -4120,7 +4084,6 @@ case "$1" in
   exit $R
   ;;
 'stop')
-  watchdog_remove
   stop_wgpia
   ;;
 'status')
@@ -4140,14 +4103,6 @@ case "$1" in
     echo "Guard (cron) installed: YES"
   else
     echo "Guard (cron) installed: NO"
-  fi
-  if watchdog_installed; then
-    echo "Watchdog (cron) installed: YES"
-    if WLR="$(watchdog_lastrun)"; then
-      echo "Watchdog last check: $WLR"
-    fi
-  else
-    echo "Watchdog (cron) installed: NO"
   fi
   exit $R
   ;;
