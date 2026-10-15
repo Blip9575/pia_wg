@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.7.0
+# Version: 1.8.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -22,6 +22,7 @@ SCRIPTNAME="${SCRIPTPATH##*/}"
 CRON_TAG_WD='# pia watchdog' # (per interface: "# pia watchdog [name]"); cron entries are recognised by these tags, not by the file name
 CRON_TAG_CACHE='# pia cache'
 CRON_TAG_RENEW='# pia renew'
+CRON_TAG_GUARD='# pia guard'
 HOOKFILE='/etc/hotplug.d/iface/80-pia'
 RENEW_SKIP=180        # seconds: a handshake this recent means the registration is alive
 RUNDIR='/var/run/pia' # temporary files (RAM); created on demand, mode 0700
@@ -2979,6 +2980,58 @@ renew_cmd() {
 
 renew_installed() { grep -qF "$CRON_TAG_RENEW" /etc/crontabs/root 2>/dev/null; }
 
+# ---- guard: a tunnel that is up but whose handshake is stale ----
+# Run by cron every minute. It only detects: a handshake older than 180 s (a
+# working tunnel renews it at least every 2 minutes, with the keepalive on), and
+# then runs the ifup hook, which registers the key if missing and confirms the
+# tunnel (withdrawing a stale route first, then recovering). An interface
+# whose keepalive is 0 is left alone: an idle tunnel has no handshake then.
+GUARD_AGE=180
+guard_installed() { grep -qF "$CRON_TAG_GUARD" /etc/crontabs/root 2>/dev/null; }
+
+# Does the interface being handled need the hook? (quiet: no output, no files)
+guard_needed() {
+  GK="$(uci -q get "pia.$PIAWG_IF.peer_persistent_keepalive")"
+  [ "${GK:-$PIA_KEEPALIVE}" = '0' ] && return 1
+  wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1 || return 1
+  # a hook run is in progress: it is doing it
+  GHP="$(cat "$RUNDIR/hook.lock/pid" 2>/dev/null)"
+  [ -n "$GHP" ] && kill -0 "$GHP" 2>/dev/null && return 1
+  GA="$(handshake_age)" || GA=''
+  [ -z "$GA" ] || [ "$GA" -gt "$GUARD_AGE" ]
+}
+
+guard_cmd() {
+  guard_needed || return 0
+  GA="$(handshake_age)" || GA=''
+  if [ -n "$GA" ]; then
+    echo "Guard: handshake ${GA}s old (over ${GUARD_AGE}s): running the ifup hook" >&3
+  else
+    echo "Guard: the interface is up without a handshake: running the ifup hook" >&3
+  fi
+  if [ -x "$HOOKFILE" ]; then
+    ACTION=ifup INTERFACE="$PIAWG_IF" "$HOOKFILE"
+  else
+    /bin/sh "$SCRIPTPATH" hook ifup "$PIAWG_IF" >/dev/null 2>&1 &
+  fi
+  return 0
+}
+
+guard_install() {
+  grep -qF "/bin/sh $SCRIPTPATH guard $CRON_TAG_GUARD" /etc/crontabs/root 2>/dev/null && return 0
+  {
+    crontab -l 2>/dev/null | grep -vF "$CRON_TAG_GUARD"
+    echo "* * * * * /bin/sh $SCRIPTPATH guard $CRON_TAG_GUARD"
+  } | crontab -
+  echo "[$(date)] Guard installed" >>"$PIALOG"
+}
+
+guard_remove() {
+  guard_installed || return 0
+  crontab -l | grep -vF "$CRON_TAG_GUARD" | crontab -
+  echo "[$(date)] Guard removed" >>"$PIALOG"
+}
+
 hook_content() {
   cat <<EOF
 #!/bin/sh
@@ -3034,6 +3087,7 @@ hook_install() {
 renew_install() {
   hook_install
   watchdog_remove
+  guard_install
   grep -qF "/bin/sh $SCRIPTPATH renew $CRON_TAG_RENEW" /etc/crontabs/root 2>/dev/null && return 0
   {
     crontab -l 2>/dev/null | grep -vF "$CRON_TAG_RENEW"
@@ -3044,6 +3098,7 @@ renew_install() {
 
 renew_remove() {
   rm -f "$HOOKFILE"
+  guard_remove
   renew_installed || return 0
   crontab -l | grep -vF "$CRON_TAG_RENEW" | crontab -
   echo "[$(date)] Renew removed" >>"$PIALOG"
@@ -3175,6 +3230,8 @@ jobs_deploy() {
   watchdog_installed || renew_installed || {
     renew_install && echo "Renew (cron, ifup hook) installed"
   }
+  # (renew_install makes the guard too; one added to an older deployment)
+  guard_installed || guard_install
   return 0
 }
 
@@ -3796,6 +3853,22 @@ fi
 set_ifvars
 PIALOG="$(logfile)"
 
+# The guard runs every minute: when nothing is wrong it must leave no trace
+# (no log file touched, no pipe made), so it looks before the logging is set up
+if [ "$1" = 'guard' ]; then
+  GSAVE="$PIAWG_IF"
+  GNEED=''
+  for GX in $(iface_list); do
+    [ -z "$SELIF" ] || [ "$SELIF" = 'all' ] || [ "$SELIF" = "$GX" ] || continue
+    PIAWG_IF="$GX"
+    set_ifvars
+    guard_needed && GNEED=1
+  done
+  [ -n "$GNEED" ] || exit 0
+  PIAWG_IF="$GSAVE"
+  set_ifvars
+fi
+
 # Logging (only if not in interactive mode)
 if [ "$1" = 'api' ]; then
   AUTO=1
@@ -3817,7 +3890,7 @@ elif [ "$AUTO" ]; then
   command -v logger >/dev/null 2>&1 && SYSLOGOK=1
   SLIF=''
   case "$1" in
-  start | stop | restart | status | renew | init-network | confirm) [ -n "$PIAWG_IF" ] && SLIF="[$PIAWG_IF] " ;;
+  start | stop | restart | status | renew | init-network | confirm | guard) [ -n "$PIAWG_IF" ] && SLIF="[$PIAWG_IF] " ;;
   esac
   awk -v lf="$PIALOG" -v date="$(date)" -v tag="pia[$$]" -v pre="PIA: $SLIF" -v sl="$SYSLOGOK" '
     {print; printf("[%s] %s\n",date,$0) >> lf}
@@ -3838,7 +3911,7 @@ fi
 # Several interfaces and none named (or -i all): run the command for each
 if [ -n "$MULTI" ] || [ "$SELIF" = 'all' ]; then
   case "$1" in
-  'start' | 'restart' | 'stop' | 'status' | 'renew' | 'init-network' | 'confirm')
+  'start' | 'restart' | 'stop' | 'status' | 'renew' | 'init-network' | 'confirm' | 'guard')
     case "$1 $2" in
     'renew install' | 'renew remove') ;;
     *)
@@ -4011,6 +4084,10 @@ case "$1" in
   confirm_cmd "$@"
   exit $?
   ;;
+'guard')
+  guard_cmd
+  exit $?
+  ;;
 'restart')
   start_wgpia
   R=$?
@@ -4058,6 +4135,11 @@ case "$1" in
     echo "Renew (cron) installed: YES"
   else
     echo "Renew (cron) installed: NO"
+  fi
+  if guard_installed; then
+    echo "Guard (cron) installed: YES"
+  else
+    echo "Guard (cron) installed: NO"
   fi
   if watchdog_installed; then
     echo "Watchdog (cron) installed: YES"

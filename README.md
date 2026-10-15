@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.7.0 (upstream 1.0.16)
+1.8.0 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -208,6 +208,10 @@ A tunnel gets the default route and its DNS server only when it works, so that a
 2. **Stage 2 (apply):** the default route (or, for an interface without it, only the DNS route) and the DNS server are given to netifd as an update of the interface, the way the protocol script would. Nothing of it is written to the flash, and an interface that is restarted starts again from stage 1 (the ifup hook confirms it again).
 
 When stage 1 fails the script recovers up to three times: it registers the key again, then refreshes the servers list and chooses another server, then renews the VPN token (a list refresh or a token renewal at most once in 10 minutes). When it still fails the tunnel stays up and unconfirmed, the WAN keeps the default route, and the next hook or cron run tries again. A confirmed tunnel whose handshake is lost has its default route and DNS server withdrawn at the next hook or renew. Every stage is logged (`Stage 1/2 (confirm)`, `Stage 2/2 (apply)`, `Stage 2/2 (withdraw)`), to the PIA log and to the system log. `pia.sh confirm [--force]` runs it by hand.
+
+## Guard (since 1.8.0)
+
+A cron job (`# pia guard`, every minute, installed with the renew job and removed with it) looks at each interface that is up. When its handshake is older than 180 seconds (a working tunnel renews it at least every 2 minutes with the keepalive on) it runs the ifup hook, which registers the key when it is missing and confirms the tunnel: a default route and DNS server that point into a dead tunnel are withdrawn first, then the recovery of the tunnel confirmation runs. The guard itself changes nothing and leaves no trace while all is well (no log file is touched). An interface whose keepalive is 0 is skipped, since an idle tunnel has no handshake then, and so is an interface that is down.
 
 ## Logging
 When the watchdog is enabled, the scripts log is located in `/var/log/pia/pia.log` (RAM on OpenWrt, so it does not wear the flash; use `./pia_wg.sh log path` to choose another directory)
