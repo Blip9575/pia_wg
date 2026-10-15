@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.6.12 (upstream 1.0.16)
+1.7.0 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -199,6 +199,15 @@ To also check that tokens can be obtained through meta servers, delete the store
 Temporary files (the API responses, which hold tokens, the logging pipe and downloads) are created in `/var/run/pia/`, in RAM, with mode 0700; the directory is created on demand (`/tmp/pia` is used if `/var/run` is not writable). Leftovers of runs that died are removed at the next run. The only temporary files elsewhere are the short-lived `*.tmp` files used to replace cache files atomically, which sit next to them in the cache directory.
 
 The commands that act on the tunnel, the tokens or the cache (`start`, `restart`, `stop`, `init-network`, `cache refresh`, `cache probe`) take a lock, `/var/run/pia/pia_wg.lock`, so that two runs cannot step on each other. The watchdog's `start` just skips when another run is in progress (it runs again a minute later); the other commands wait up to 2 minutes and then give up with exit status 75. A lock left by a run that died is removed, and a run still holding it after 15 minutes is considered stuck and terminated. `configure` does not take the lock, so that waiting at a prompt cannot stop the watchdog.
+
+## Tunnel confirmation (since 1.7.0)
+
+A tunnel gets the default route and its DNS server only when it works, so that a key PIA does not know, or a server that does not answer, can no longer leave a default route that goes nowhere:
+
+1. **Stage 1 (confirm):** the interface comes up with its key but without routes or DNS (the network config has no `dns` and no `route_allowed_ips`; the allowed IPs are always everything). The script waits for the handshake (up to 15 s) and sends a DNS query to the PIA DNS server through the tunnel, over a host route made first so that it cannot leave through the WAN.
+2. **Stage 2 (apply):** the default route (or, for an interface without it, only the DNS route) and the DNS server are given to netifd as an update of the interface, the way the protocol script would. Nothing of it is written to the flash, and an interface that is restarted starts again from stage 1 (the ifup hook confirms it again).
+
+When stage 1 fails the script recovers up to three times: it registers the key again, then refreshes the servers list and chooses another server, then renews the VPN token (a list refresh or a token renewal at most once in 10 minutes). When it still fails the tunnel stays up and unconfirmed, the WAN keeps the default route, and the next hook or cron run tries again. A confirmed tunnel whose handshake is lost has its default route and DNS server withdrawn at the next hook or renew. Every stage is logged (`Stage 1/2 (confirm)`, `Stage 2/2 (apply)`, `Stage 2/2 (withdraw)`), to the PIA log and to the system log. `pia.sh confirm [--force]` runs it by hand.
 
 ## Logging
 When the watchdog is enabled, the scripts log is located in `/var/log/pia/pia.log` (RAM on OpenWrt, so it does not wear the flash; use `./pia_wg.sh log path` to choose another directory)

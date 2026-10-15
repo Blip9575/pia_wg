@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.6.12
+# Version: 1.7.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2112,10 +2112,11 @@ persist_batch() {
     echo "delete network.$PIAWG_PEER.$PBK"
   done
   echo "set network.$PIAWG_IF.private_key=$WGPLACEHOLDER"
-  # PIA's DNS server (iface_dns, kept by dns_apply); the one for the region otherwise
-  if ! uci -q get "pia.$PIAWG_IF.iface_dns" >/dev/null; then
-    echo "add_list network.$PIAWG_IF.dns=$(dns_wanted)"
-  fi
+  # (no dns and no route_allowed_ips here: the DNS server and the routes are given
+  # to netifd by confirm_tunnel once the tunnel works; the allowed IPs are always
+  # everything, which routes nothing by itself)
+  echo "add_list network.$PIAWG_PEER.allowed_ips=0.0.0.0/0"
+  echo "add_list network.$PIAWG_PEER.allowed_ips=::/0"
   echo "set network.$PIAWG_PEER.description='PIA $(uci -q get "pia.$PIAWG_IF.region_name" | tr -d "'")'"
   # the form of LuCI's own save (the Network pages): dns is a list, multipath is
   # set and a defaultroute of 1 (the default) is left out, so that saving the
@@ -2134,7 +2135,8 @@ persist_batch() {
       else if (k ~ /^peer_/) { sub(/^peer_/, "", k); t=np }
       else next
       if (t==ni && k=="defaultroute" && $3==one) next
-      if (t==ni && k=="auto") next
+      if (t==ni && (k=="auto" || k=="dns")) next
+      if (t==np && (k=="allowed_ips" || k=="route_allowed_ips")) next
       if (!((t "." k) in seen)) { seen[t "." k]=1; printf("delete %s.%s\n", t, k) }
       printf("%s %s.%s=%s\n", ($1=="option" && !(t==ni && k=="dns") ? "set" : "add_list"), t, k, $3)
     }'
@@ -2578,6 +2580,7 @@ start_wgpia() {
   check_wg
   RET=$?
   [ $RET -eq 0 ] && echo "PIA started successfully ..." >&3 || echo "Could not start PIA!" >&3
+  [ $RET -ne 0 ] || confirm_tunnel || :
   return $RET
 }
 
@@ -2612,7 +2615,7 @@ check_wg() {
   # Probe PIA's own in-tunnel DNS address (handed out by addKey): the probe is
   # an ICMP packet that never leaves the tunnel and names no third party.
   # The first hop does not always answer TTL expiry, so also try a plain ping
-  CHK="$(uci -q get "network.$PIAWG_IF.dns" | awk '{print $1}')"
+  CHK="$(dns_hosts | awk '{print $1}')"
   [ -n "$CHK" ] || CHK='10.0.0.243'
   if traceroute -i "$PIAWG_IF" -q1 -m1 "$CHK" | grep -q ' ms' ||
     ping -q -c1 -n -W 3 -I "$PIAWG_IF" "$CHK" >/dev/null 2>&1; then
@@ -2731,6 +2734,198 @@ time_gate() {
   fi
   echo "Warning: the clock is not synchronised; certificates may be rejected" >&3
   return 0
+}
+
+# ---- confirmation: the default route and the DNS server only for a tunnel that works ----
+# Stage 1: the tunnel is up with its key, but netifd has neither a route nor a
+#   DNS server for it (the network config has no dns and no route_allowed_ips,
+#   and the protocol script sends none): the handshake is awaited and a DNS
+#   query is sent through the tunnel (over a host route made first, so that it
+#   cannot leave through the WAN).
+# Stage 2: the routes and the DNS server are given to netifd as an update of the
+#   interface, what the protocol script would have sent: netifd and everything
+#   that reads it (dqm's IoT DNS hook, trm...) see them as they always did.
+# Nothing of it is written to the flash, and a restarted interface starts again
+# from stage 1 (its ifup runs the hook, which confirms again).
+# tunnel_update [withdraw]: give netifd the routes and the DNS server, or (withdraw)
+# take them back: the tunnel is not trusted any more
+tunnel_update() {
+  TUADDR="$(session_get peer_ip)"
+  [ -n "$TUADDR" ] || return 1
+  TUDNS="$(dns_hosts)"
+  TUMODE='dns'
+  has_default_route "$PIAWG_IF" && TUMODE='full'
+  [ "$1" = 'withdraw' ] && TUMODE='none'
+  (
+    # shellcheck disable=SC1091
+    . /lib/functions.sh
+    # shellcheck disable=SC1091
+    . /lib/netifd/netifd-proto.sh
+    proto_init_update "$PIAWG_IF" 1
+    proto_add_ipv4_address "$TUADDR" 32
+    if [ "$TUMODE" = 'full' ]; then
+      proto_add_ipv4_route 0.0.0.0 0
+      proto_add_ipv6_route :: 0
+    fi
+    for TUD in $TUDNS; do
+      [ "$TUMODE" = 'none' ] && break
+      [ "$TUMODE" = 'full' ] || proto_add_ipv4_route "$TUD" 32
+      proto_add_dns_server "$TUD"
+    done
+    proto_send_update "$PIAWG_IF"
+  ) || return 1
+  # what follows the interface's DNS server (dqm's IoT upstream file) is told as
+  # at an ifup: netifd's own events for an update are not ifup or ifdown
+  if [ -x /etc/hotplug.d/iface/90-dqm-iot-dns ]; then
+    ACTION=ifup INTERFACE="$PIAWG_IF" /etc/hotplug.d/iface/90-dqm-iot-dns >/dev/null 2>&1
+  fi
+  return 0
+}
+
+# A handshake that is recent (the keepalive renews it every 25 s)
+tunnel_handshake() {
+  THA="$(handshake_age)" && [ "$THA" -lt "$RENEW_SKIP" ]
+}
+
+# Does the PIA DNS server answer through the tunnel? (host routes first)
+tunnel_dns_probe() {
+  for TDD in $(dns_hosts); do
+    ip route replace "$TDD/32" dev "$PIAWG_IF" 2>/dev/null
+    nslookup -timeout=3 privateinternetaccess.com "$TDD" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+# Has stage 2 been done: handshake, DNS server and (if it has it) the default route
+confirm_done() {
+  tunnel_handshake || return 1
+  CDF="$(dns_hosts | awk '{print $1}')"
+  ubus call "network.interface.$PIAWG_IF" status 2>/dev/null | jsonfilter -e '@["dns-server"][*]' | grep -qxF "$CDF" || return 1
+  if has_default_route "$PIAWG_IF"; then
+    ip -4 route show default dev "$PIAWG_IF" 2>/dev/null | grep -q . || return 1
+  fi
+  return 0
+}
+
+# One look at the tunnel (stage 1); CTWHY says what is wrong
+confirm_check() {
+  CTWHY=''
+  if ! wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1; then
+    CTWHY='the interface is not up'
+    return 1
+  fi
+  CTD0="$(date +%s)"
+  while ! tunnel_handshake; do
+    if [ $(($(date +%s) - CTD0)) -ge 15 ]; then
+      CTWHY='no handshake after 15s'
+      return 1
+    fi
+    # (the query makes the first packets: it starts the handshake)
+    tunnel_dns_probe >/dev/null 2>&1
+    sleep 1
+  done
+  echo "Stage 1/2 (confirm): handshake confirmed after $(($(date +%s) - CTD0))s" >&3
+  CTD1="$(date +%s)"
+  if ! tunnel_dns_probe; then
+    CTWHY="DNS server $(dns_hosts | awk '{print $1}') did not answer through the tunnel"
+    return 1
+  fi
+  echo "Stage 1/2 (confirm): DNS server $(dns_hosts | awk '{print $1}') answered through the tunnel ($(($(date +%s) - CTD1))s)" >&3
+  return 0
+}
+
+# A step of the recovery: 1 register the key again, 2 refresh the servers list
+# and choose the server again, 3 renew the VPN token. A list refresh or a token
+# renewal at most once in 10 minutes.
+confirm_recover() {
+  CRN="$1"
+  CRNOW="$(date +%s)"
+  CROLDEP="$(session_get server_ip)"
+  case "$CRN" in
+  2)
+    CRL="$(cat "$RUNDIR/last.list" 2>/dev/null)"
+    if [ $((CRNOW - ${CRL:-0})) -ge 600 ]; then
+      echo "Stage 1/2 (confirm): refreshing the servers list (attempt 2/3)" >&3
+      pia_wan
+      echo "$CRNOW" >"$RUNDIR/last.list"
+      cache_refresh_list >/dev/null 2>&1 || echo "Stage 1/2 (confirm): the servers list could not be refreshed" >&3
+      PIAREGIONS=''
+      fast_region
+    else
+      echo "Stage 1/2 (confirm): the servers list was refreshed less than 10 minutes ago; another server is chosen (attempt 2/3)" >&3
+    fi
+    # not the server that did not answer
+    PIAEXCL="$CROLDEP"
+    ;;
+  3)
+    CRL="$(cat "$RUNDIR/last.token" 2>/dev/null)"
+    if [ $((CRNOW - ${CRL:-0})) -ge 600 ]; then
+      echo "Stage 1/2 (confirm): renewing the VPN token (attempt 3/3)" >&3
+      echo "$CRNOW" >"$RUNDIR/last.token"
+      pia_token_forget
+    else
+      echo "Stage 1/2 (confirm): the VPN token was renewed less than 10 minutes ago; kept (attempt 3/3)" >&3
+    fi
+    PIAEXCL="$CROLDEP"
+    ;;
+  *) echo "Stage 1/2 (confirm): registering the key again (attempt 1/3)" >&3 ;;
+  esac
+  NEWKEY=1
+  APPLY=1
+  set_netconf
+  CRRC=$?
+  NEWKEY=''
+  APPLY=''
+  PIAEXCL=''
+  sleep 2
+  return $CRRC
+}
+
+# Confirm the tunnel and apply stage 2; recover (up to 3 times) when stage 1 fails
+confirm_tunnel() {
+  CTA=0
+  # routes that were applied for a tunnel that no longer answers are taken back
+  # at once (the WAN default route and its DNS serve meanwhile)
+  if ! tunnel_handshake && ip -4 route show default dev "$PIAWG_IF" 2>/dev/null | grep -q .; then
+    echo "Stage 2/2 (withdraw): no recent handshake: default route and DNS server withdrawn" >&3
+    tunnel_update withdraw
+  fi
+  while :; do
+    if confirm_check; then
+      if tunnel_update; then
+        if has_default_route "$PIAWG_IF"; then
+          echo "Stage 2/2 (apply): default route and DNS server $(dns_hosts | awk '{print $1}') applied" >&3
+        else
+          echo "Stage 2/2 (apply): DNS server $(dns_hosts | awk '{print $1}') and its route applied" >&3
+        fi
+        rm -f "$RUNDIR/confirm.fail.$PIAWG_IF"
+        return 0
+      fi
+      CTWHY='the interface could not be updated'
+    fi
+    CTA=$((CTA + 1))
+    if [ $CTA -gt 3 ]; then
+      date +%s >"$RUNDIR/confirm.fail.$PIAWG_IF"
+      echo "Error: Stage 1/2 (confirm) FAILED after 3 attempts (last: $CTWHY): the tunnel stays unconfirmed, the WAN keeps the default route; retried at the next hook or cron" >&3
+      return 1
+    fi
+    echo "Stage 1/2 (confirm): FAILED ($CTWHY)" >&3
+    case $CTA in 1) sleep 5 ;; 2) sleep 15 ;; *) sleep 30 ;; esac
+    confirm_recover "$CTA" || echo "Stage 1/2 (confirm): the key could not be registered" >&3
+  done
+}
+
+# confirm [--force]: nothing when the interface is down or already confirmed;
+# after a failure not again within 2 minutes (unless --force)
+confirm_cmd() {
+  wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1 || return 0
+  confirm_done && return 0
+  if [ "$1" != '--force' ]; then
+    CCF="$(cat "$RUNDIR/confirm.fail.$PIAWG_IF" 2>/dev/null)"
+    [ $(($(date +%s) - ${CCF:-0})) -lt 120 ] && return 0
+  fi
+  session_valid || return 0
+  confirm_tunnel
 }
 
 # renew [--force] [--new-key] [--apply] [--if-missing]
@@ -2869,6 +3064,7 @@ hook_cmd() {
     [ -n "$HEP" ] && endpoint_route "$HEP" pin
     # up with nothing registered: make the session, which restarts it
     session_staged || /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" renew --if-missing --apply
+    /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" confirm
   else
     # another interface: a WAN that came back may need our session and a new gateway
     for HX in $(iface_list); do
@@ -2881,6 +3077,7 @@ hook_cmd() {
       /bin/sh "$SCRIPTPATH" -i "$HX" renew --if-missing $HXA
       HEP="$(sget "network.$PIAWG_PEER.endpoint_host")"
       [ -n "$HEP" ] && endpoint_route "$HEP" pin
+      /bin/sh "$SCRIPTPATH" -i "$HX" confirm
     done
   fi
   return 0
@@ -3620,7 +3817,7 @@ elif [ "$AUTO" ]; then
   command -v logger >/dev/null 2>&1 && SYSLOGOK=1
   SLIF=''
   case "$1" in
-  start | stop | restart | status | renew | init-network) [ -n "$PIAWG_IF" ] && SLIF="[$PIAWG_IF] " ;;
+  start | stop | restart | status | renew | init-network | confirm) [ -n "$PIAWG_IF" ] && SLIF="[$PIAWG_IF] " ;;
   esac
   awk -v lf="$PIALOG" -v date="$(date)" -v tag="pia[$$]" -v pre="PIA: $SLIF" -v sl="$SYSLOGOK" '
     {print; printf("[%s] %s\n",date,$0) >> lf}
@@ -3641,7 +3838,7 @@ fi
 # Several interfaces and none named (or -i all): run the command for each
 if [ -n "$MULTI" ] || [ "$SELIF" = 'all' ]; then
   case "$1" in
-  'start' | 'restart' | 'stop' | 'status' | 'renew' | 'init-network')
+  'start' | 'restart' | 'stop' | 'status' | 'renew' | 'init-network' | 'confirm')
     case "$1 $2" in
     'renew install' | 'renew remove') ;;
     *)
@@ -3669,7 +3866,7 @@ fi
 
 # The clock first: the certificates and the tokens' expiry depend on it
 case "$1" in
-'start' | 'restart' | 'init-network') time_gate "$@" ;;
+'start' | 'restart' | 'init-network' | 'confirm') time_gate "$@" ;;
 'renew') case "$2" in
   'install' | 'remove') ;;
   *) time_gate "$@" ;;
@@ -3681,7 +3878,7 @@ esac
 
 # Serialise the runs that act on the tunnel, the tokens or the cache
 case "$1" in
-'start' | 'restart' | 'stop' | 'init-network') lock_take "$1" ;;
+'start' | 'restart' | 'stop' | 'init-network' | 'confirm') lock_take "$1" ;;
 'renew') case "$2" in
   'install' | 'remove') ;;
   *) lock_take "$1" ;;
@@ -3809,6 +4006,11 @@ case "$1" in
     ;;
   esac ;;
 'hook') shift && hook_cmd "$@" ;;
+'confirm')
+  shift
+  confirm_cmd "$@"
+  exit $?
+  ;;
 'restart')
   start_wgpia
   R=$?
