@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.9.0
+# Version: 1.9.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -43,7 +43,7 @@ PIA_DNS_SO='10.0.0.243'
 PIA_DNS_MACE='10.0.0.244'
 PIA_DNS_SO_MACE='10.0.0.241'
 PIA_MTU_SMALL=1280   # the Android app's 'small packets' WireGuard MTU
-PIA_MTU_OPTIMAL=1440 # IPv4 only: 1500 minus the 60 bytes of IPv4 + WireGuard (a WAN of 1500, or PPPoE with 1508)
+PIA_MTU_MAX=1420     # the largest custom packet size: PIA's servers use 1420 on their side (measured 2026-10-15: they fragment larger replies), so more gains nothing
 PIA_MTU_OVERHEAD=80  # WAN MTU minus this = PIA's standard (the desktop app, 1420 on 1500)
 PIA_KEEPALIVE=25     # the official apps' PersistentKeepalive
 PIA_MTU_MIN=1280     # custom packet size: IPv6 needs 1280
@@ -1799,12 +1799,12 @@ std_mtu() {
   echo $((SMM - PIA_MTU_OVERHEAD))
 }
 
-# Is $1 a custom packet size (digits only, 1280 to 1440)?
+# Is $1 a custom packet size (digits only, 1280 to 1420)?
 valid_mtu() {
   case "$1" in
   '' | *[!0-9]*) return 1 ;;
   esac
-  [ "$1" -ge "$PIA_MTU_MIN" ] && [ "$1" -le "$PIA_MTU_OPTIMAL" ]
+  [ "$1" -ge "$PIA_MTU_MIN" ] && [ "$1" -le "$PIA_MTU_MAX" ]
 }
 
 # Is $1 a keepalive in seconds (digits only, 1 to 65535)?
@@ -1871,20 +1871,18 @@ ask_keepalive() {
   uci -q commit pia
 }
 
-# Packet size: PIA's standard one, optimal, small or a custom one
+# Packet size: PIA's standard one, small or a custom one
 ask_mtu() {
   [ -z "$AUTO" ] || return 0
   AMSTD="$(std_mtu)"
   AMCUR="$(uci -q get "pia.$PIAWG_IF.iface_mtu")"
   AMDEF=1
-  [ -n "$AMCUR" ] && [ "$AMCUR" -eq "$PIA_MTU_OPTIMAL" ] && AMDEF=2
-  [ -n "$AMCUR" ] && [ "$AMCUR" -eq "$PIA_MTU_SMALL" ] && AMDEF=3
-  [ -n "$AMCUR" ] && [ "$AMCUR" -ne "$AMSTD" ] && [ "$AMCUR" -ne "$PIA_MTU_OPTIMAL" ] && [ "$AMCUR" -ne "$PIA_MTU_SMALL" ] && AMDEF=4
+  [ -n "$AMCUR" ] && [ "$AMCUR" -eq "$PIA_MTU_SMALL" ] && AMDEF=2
+  [ -n "$AMCUR" ] && [ "$AMCUR" -ne "$AMSTD" ] && [ "$AMCUR" -ne "$PIA_MTU_SMALL" ] && AMDEF=3
   echo "Packet size (MTU):"
   echo "  1) Default ($AMSTD): recommended for IPv4 + IPv6 traffic"
-  echo "  2) Optimal ($PIA_MTU_OPTIMAL): IPv4 only via WAN 1500 or PPPoE 1508"
-  echo "  3) Small ($PIA_MTU_SMALL): improve compatibility for mobile networks"
-  echo "  4) Custom ($PIA_MTU_MIN to $PIA_MTU_OPTIMAL)"
+  echo "  2) Small ($PIA_MTU_SMALL): improve compatibility for mobile networks"
+  echo "  3) Custom ($PIA_MTU_MIN to $PIA_MTU_MAX)"
   [ -z "$AMCUR" ] || echo "  (now $AMCUR)"
   while :; do
     printf "Select the packet size (press enter for %s): " "$AMDEF"
@@ -1896,15 +1894,11 @@ ask_mtu() {
       break
       ;;
     2)
-      uci -q set "pia.$PIAWG_IF.iface_mtu=$PIA_MTU_OPTIMAL"
-      break
-      ;;
-    3)
       uci -q set "pia.$PIAWG_IF.iface_mtu=$PIA_MTU_SMALL"
       break
       ;;
-    4)
-      printf "Packet size (%s to %s): " "$PIA_MTU_MIN" "$PIA_MTU_OPTIMAL"
+    3)
+      printf "Packet size (%s to %s): " "$PIA_MTU_MIN" "$PIA_MTU_MAX"
       read -r AMC || AMC=''
       if valid_mtu "$AMC"; then
         uci -q set "pia.$PIAWG_IF.iface_mtu=$AMC"
@@ -3277,7 +3271,7 @@ print_usage() {
   echo "    - configure interface [name] : create an interface (a section of /etc/config/pia)"
   echo "    - configure protocol : AmneziaWG, WireGuard or automatic for the interface (asked when it is created)"
   echo "    - configure dns      : PIA DNS, PIA with MACE or a custom DNS server (asked when the interface is created)"
-  echo "    - configure mtu      : default, optimal, small or custom packet size (asked when the interface is created)"
+  echo "    - configure mtu      : default, small or custom packet size (asked when the interface is created)"
   echo "    - configure keepalive: default (25), disabled or custom keepalive (asked when the interface is created)"
   echo "    - configure rename <name>    : rename the interface (-i old)"
   echo "    - configure remove <name>    : forget an interface (config, network sections, cron)"
@@ -3420,7 +3414,7 @@ api_status() {
     --arg id "$(uci -q get pia.account.id)" --arg pw "$(uci -q get pia.account.password)" \
     --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
     --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg stdmtu "$(std_mtu)" \
-    --arg small "$PIA_MTU_SMALL" --arg optimal "$PIA_MTU_OPTIMAL" \
+    --arg small "$PIA_MTU_SMALL" --arg max "$PIA_MTU_MAX" \
     --arg dns "$PIA_DNS" --arg dnsso "$PIA_DNS_SO" --arg dnsmace "$PIA_DNS_MACE" --arg dnssomace "$PIA_DNS_SO_MACE" \
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
     --arg cdir "$ACD" --arg cpath "$(uci -q get pia.cache.dir || echo "$CACHEDEFDIR")" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
@@ -3428,7 +3422,7 @@ api_status() {
     '{version: $version, awg: ($awg == 1), strict_dns: ($strict == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
       zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan,
-      std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), optimal_mtu: ($optimal | tonumber),
+      std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), max_mtu: ($max | tonumber),
       dns_servers: {standard: $dns, streaming: $dnsso, mace: $dnsmace, streaming_mace: $dnssomace},
       cache: {regions: $regions, updated: ($listts | tonumber? // 0), checked: ($checked | tonumber? // 0),
               dir: $cdir, path: $cpath, ram: ($cram == 1), cron: ($ccron == 1), meta: ($cmeta | tonumber? // 0)},
@@ -3537,7 +3531,7 @@ api_job() {
 
 # api_iface_save <name> [key=value…]: create or modify an interface
 #   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace|custom
-#   dns_ip=<IPv4 of a custom DNS server>  mtu=std|optimal|small|<1280-1440>
+#   dns_ip=<IPv4 of a custom DNS server>  mtu=std|small|<1280-1420>
 #   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
 #   boot=yes|no (netifd starts it at boot)  forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
 api_iface_save() {
@@ -3578,8 +3572,12 @@ api_iface_save() {
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_BOOT" in '' | yes | no) ;; *) api_fail "Invalid boot choice" ;; esac
   case "$A_MTU" in
-  '' | std | optimal | small) ;;
-  *) valid_mtu "$A_MTU" || api_fail "Packet size: digits only, $PIA_MTU_MIN to $PIA_MTU_OPTIMAL" ;;
+  '' | std | small) ;;
+  *)
+    # (a size set before the limit was lowered stays valid until it is changed)
+    valid_mtu "$A_MTU" || [ "$A_MTU" = "$(uci -q get "pia.$AN.iface_mtu")" ] ||
+      api_fail "Packet size: digits only, $PIA_MTU_MIN to $PIA_MTU_MAX"
+    ;;
   esac
   case "$A_KEEP" in
   '' | default | off) ;;
@@ -3676,7 +3674,6 @@ api_iface_save() {
   if [ -n "$A_DNS" ] && ! has_default_route "$AN"; then set_default_route no; fi
   case "$A_MTU" in
   std) uci -q set "pia.$AN.iface_mtu=$(std_mtu)" ;;
-  optimal) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_OPTIMAL" ;;
   small) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_SMALL" ;;
   '') ;;
   *) uci -q set "pia.$AN.iface_mtu=$A_MTU" ;;

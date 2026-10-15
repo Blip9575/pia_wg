@@ -118,7 +118,7 @@ const DNSOPTS = [
 	[ 'custom', _('Custom'), _('Provide DNS server address') ]
 ];
 
-const MTU_MIN = 1280, MTU_MAX = 1440, KEEPALIVE = 25;
+const MTU_MIN = 1280, MTU_MAX = 1420, KEEPALIVE = 25;
 const KEEPOPTS = [
 	[ 'default', _('Default (%d)').format(KEEPALIVE), _('The value of the official PIA apps.') ],
 	[ 'off', _('Disabled (0)'), _('No keepalive packets: a NAT or firewall in between may drop the idle tunnel.') ],
@@ -148,7 +148,6 @@ function withInput(ctl, input) {
 function mtuOpts(st) {
 	return [
 		[ 'std', _('Default (%d)').format(st.std_mtu), _('Recommended for IPv4 + IPv6 traffic') ],
-		[ 'optimal', _('Optimal (%d)').format((st.optimal_mtu || 1440)), _('IPv4 only via WAN 1500 or PPPoE 1508.') ],
 		[ 'small', _('Small (%d)').format(st.small_mtu), _('Improve compatibility for mobile networks') ],
 		[ 'custom', _('Custom'), _('Provide MTU value') ]
 	];
@@ -561,9 +560,8 @@ return view.extend({
 			'placeholder': _('IPv4 address'), 'value': !adding && i.dns == 'custom' ? i.dns_ip : '', 'style': 'margin-top:.4em' });
 		const dnsBox = withInput(dnsCtl, dnsInp);
 		const cur = adding ? 0 : i.mtu;
-		const optimal = st.optimal_mtu || MTU_MAX;
-		const isCustom = cur && cur != st.std_mtu && cur != optimal && cur != st.small_mtu;
-		const mtuCtl = selectHelp(mtuOpts(st), !cur || cur == st.std_mtu ? 'std' : cur == optimal ? 'optimal' : cur == st.small_mtu ? 'small' : 'custom');
+		const isCustom = cur && cur != st.std_mtu && cur != st.small_mtu;
+		const mtuCtl = selectHelp(mtuOpts(st), !cur || cur == st.std_mtu ? 'std' : cur == st.small_mtu ? 'small' : 'custom');
 		const mtuInp = numInput(isCustom ? cur : '', _('%d to %d').format(MTU_MIN, MTU_MAX));
 		const mtuBox = withInput(mtuCtl, mtuInp);
 		const ka = adding || i.keepalive == null || i.keepalive == KEEPALIVE ? 'default' : i.keepalive == 0 ? 'off' : 'custom';
@@ -610,7 +608,7 @@ return view.extend({
 			if (picker && !g.region) return problem(_('Choose a region'));
 			if (mtuCtl.node.value == 'custom') {
 				const m = +mtuInp.value;
-				if (!/^[0-9]+$/.test(mtuInp.value) || m < MTU_MIN || m > MTU_MAX)
+				if (!/^[0-9]+$/.test(mtuInp.value) || m < MTU_MIN || (m > MTU_MAX && m != cur))
 					return problem(_('Packet size: digits only, %d to %d').format(MTU_MIN, MTU_MAX));
 			}
 			if (keepCtl.node.value == 'custom') {
