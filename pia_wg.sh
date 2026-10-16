@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.10.1
+# Version: 1.10.2
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -256,11 +256,96 @@ history_flush() {
   rmdir "$RUNDIR/history.lock" 2>/dev/null
   return 0
 }
+# Server addresses the interfaces use now: a request to one of them would remove the live key
+probe_live_ips() {
+  PLSAVE="$PIAWG_IF"
+  for PLX in $(iface_list); do
+    PIAWG_IF="$PLX"
+    set_ifvars
+    sget "network.$PIAWG_PEER.endpoint_host"
+  done
+  PIAWG_IF="$PLSAVE"
+  set_ifvars
+}
+
+# history probe [--rounds N] [--delay S] REGION|CC ...: ask the servers of the regions (or of every
+# region of a country: GB) whether they accept the VPN token, N times, with an invalid public
+# key: 409 = accepted, 401 = refused, nothing is registered. Each answer goes to the history.
+history_probe() {
+  HPR=8
+  HPD=3
+  HPREG=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    --rounds) HPR="$2" && shift 2 ;;
+    --delay) HPD="$2" && shift 2 ;;
+    *) HPREG="$HPREG $1" && shift ;;
+    esac
+  done
+  case "$HPR$HPD" in '' | *[!0-9]*) echo "--rounds and --delay take whole numbers" >&2 && return 1 ;; esac
+  if [ "$HPR" -lt 1 ] || [ "$HPR" -gt 50 ] || [ "$HPD" -gt 60 ]; then
+    echo "--rounds 1 to 50, --delay 0 to 60" >&2
+    return 1
+  fi
+  [ -n "$HPREG" ] || {
+    echo "Usage: history probe [--rounds N] [--delay S] REGION|COUNTRY ... (e.g. GB or uk_manchester)" >&2
+    return 1
+  }
+  pia_wan
+  HPCA="$(pia_ca)"
+  token_ok vpntoken || pia_tokens >/dev/null 2>&1
+  HPU="$(uci -q get pia.vpntoken.user)"
+  HPP="$(uci -q get pia.vpntoken.pass)"
+  [ -n "$HPU" ] || {
+    echo "No VPN token: log in first" >&2
+    return 1
+  }
+  HPPORT="$PIA_WG_PORT"
+  [ "$PIAPROTO" = 'amneziawg' ] && HPPORT="$PIA_AWG_PORT"
+  HPKP='addKey'
+  [ "$PIAPROTO" = 'amneziawg' ] && HPKP='add-awg-key'
+  HPLIVE="$(probe_live_ips | tr '\n' ' ')"
+  : >"$RUNDIR/probe.$$.list"
+  for HPX in $HPREG; do
+    case "$HPX" in
+    [A-Z][A-Z]) HPIDS="$(jq -r --arg c "$HPX" --arg g "$SRVGRP" '.regions[] | select(.country == $c and .offline == false and .servers[$g]) | .id' "$(cache_dir)/servers.json")" ;;
+    *) HPIDS="$HPX" ;;
+    esac
+    for HPID in $HPIDS; do
+      jq -r --arg r "$HPID" --arg g "$SRVGRP" --arg p "$HPPORT" \
+        '.regions[] | select(.id == $r) | .servers[$g][]? | "\($r) \(.ip) \(.cn) \(.port // $p)"' "$(cache_dir)/servers.json" 2>/dev/null |
+        awk -v u="$HPLIVE" 'BEGIN {n = split(u, a, " "); for (i = 1; i <= n; i++) x[a[i]] = 1} !($2 in x)' >>"$RUNDIR/probe.$$.list"
+    done
+  done
+  HPN="$(grep -c . "$RUNDIR/probe.$$.list")"
+  [ "$HPN" -gt 0 ] || {
+    rm -f "$RUNDIR/probe.$$.list"
+    echo "No servers found for:$HPREG (the live servers are skipped)" >&2
+    return 1
+  }
+  echo "Probing $HPN servers, $HPR rounds, ${HPD}s apart (the servers in use are skipped: $HPLIVE)"
+  HPI=0
+  while [ "$HPI" -lt "$HPR" ]; do
+    HPI=$((HPI + 1))
+    while read -r HPRID HPIP HPCN HPPT; do
+      HPC="$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --connect-timeout 5 --max-time 12 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$HPCA" --connect-to "$HPCN::$HPIP:$HPPT" -G --user "$HPU:$HPP" --data-urlencode "pubkey=x" "https://$HPCN:$HPPT/$HPKP")"
+      HPCODE="${HPC%% *}"
+      HPMS="$(echo "${HPC#* }" | awk '{printf "%d", $1 * 1000}')"
+      case "$HPCODE" in 409 | 200) HPST='ok' ;; 401) HPST='refused' ;; 000) HPST='timeout' ;; *) HPST='failed' ;; esac
+      history_add probe "$HPST" "$HPIP" "$HPCN" "$HPMS" "HTTP $HPCODE, round $HPI" "$HPRID"
+    done <"$RUNDIR/probe.$$.list"
+    [ "$HPI" -lt "$HPR" ] && sleep "$HPD"
+  done
+  rm -f "$RUNDIR/probe.$$.list"
+  history_flush
+  echo "Done: $((HPN * HPR)) requests recorded (see History in LuCI, or 'api history')"
+}
+
 api_history() {
   HFF="$(history_file)"
   if [ -s "$HFF" ] && jq -e 'type == "array"' "$HFF" >/dev/null 2>&1; then
     jq -c '{ok: true, entries: (reverse | .[0:200]),
-      summary: ([.[] | select(.ev == "register")] | group_by(.region_id) | map(
+      summary: ([.[] | select(.ev == "register" or .ev == "probe")] | group_by(.region_id) | map(
         (map(select(.status == "ok" and .ms != null) | .ms)) as $m
         | {region_id: .[0].region_id, region: .[0].region, country: .[0].country, total: length,
            refused: (map(select(.status == "refused")) | length), ok: (map(select(.status == "ok")) | length),
@@ -3413,7 +3498,7 @@ install_jobs() {
 }
 
 print_usage() {
-  echo "Usage: $0 [ -i <interface|all> ] { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | renew [ --force | --new-key | --apply ] | renew { install | remove } | watchdog { install | remove } (aliases of the guard) | cache { refresh | install | remove | show | probe } | log { show | clear | path } | update | version}"
+  echo "Usage: $0 [ -i <interface|all> ] { configure <section> | start [ --watchdog ] [ --cache ] | restart [ --watchdog ] [ --cache ] | stop | status | renew [ --force | --new-key | --apply ] | renew { install | remove } | watchdog { install | remove } (aliases of the guard) | cache { refresh | install | remove | show | probe } | history probe [ --rounds N ] [ --delay S ] REGION|COUNTRY... | log { show | clear | path } | update | version}"
   echo "  The interfaces are the sections of /etc/config/pia, named like the network interface."
   echo "  With several, -i NAME selects one (-i all or nothing: every one, for start, restart, stop, status, renew)."
   echo "  Details:"
@@ -4079,6 +4164,7 @@ case "$1" in
 'cache') case "$2" in
   'refresh' | 'probe') time_gate "$@" ;;
   esac ;;
+'history') [ "$2" = 'probe' ] && time_gate "$@" ;;
 esac
 
 # Serialise the runs that act on the tunnel, the tokens or the cache
@@ -4196,6 +4282,18 @@ case "$1" in
     ;;
   *)
     echo "Unknown cache subcommand '$2'!"
+    print_usage
+    exit 1
+    ;;
+  esac ;;
+'history') case "$2" in
+  'probe')
+    shift 2
+    history_probe "$@"
+    exit $?
+    ;;
+  *)
+    echo "Unknown history subcommand '$2'!"
     print_usage
     exit 1
     ;;

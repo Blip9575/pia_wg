@@ -705,14 +705,14 @@ return view.extend({
 				dom.content(this.histBox, E('p', { 'class': 'cbi-value-description' }, _('Nothing has been recorded yet.')));
 				return;
 			}
-			const EVENTS = { register: _('Key registration'), fast: _('Fastest-region ping'), confirm: _('Tunnel confirmation'), guard: _('Guard') };
+			const EVENTS = { register: _('Key registration'), probe: _('Token probe'), fast: _('Fastest-region ping'), confirm: _('Tunnel confirmation'), guard: _('Guard') };
 			const ms = v => (v == null) ? '–' : '%d ms'.format(v);
 			const cell = (t, v) => E('td', { 'class': 'td', 'data-title': t }, v);
 			const head = cols => E('tr', { 'class': 'tr table-titles' }, cols.map(c => E('th', { 'class': 'th' }, c)));
 			const sumTable = E('table', { 'class': 'table' }, [
-				head([ _('Region'), _('Country'), _('Registrations'), _('Accepted'), _('Refused'), _('Average time') ])
+				head([ _('Region'), _('Country'), _('Requests'), _('Accepted'), _('Refused'), _('Average time') ])
 			].concat(sum.map(x => E('tr', { 'class': 'tr' }, [
-				cell(_('Region'), x.region || x.region_id), cell(_('Country'), x.country || '–'), cell(_('Registrations'), String(x.total)),
+				cell(_('Region'), x.region || x.region_id), cell(_('Country'), x.country || '–'), cell(_('Requests'), String(x.total)),
 				cell(_('Accepted'), String(x.ok)), cell(_('Refused'), x.refused + ' (' + (x.total ? Math.round(100 * x.refused / x.total) : 0) + '%)'),
 				cell(_('Average time'), ms(x.ms))
 			]))));
@@ -727,10 +727,10 @@ return view.extend({
 			const total = sum.reduce((n, x) => n + x.total, 0), refused = sum.reduce((n, x) => n + x.refused, 0);
 			dom.content(this.histBox, [
 				E('h4', _('Region summary')),
-				E('div', { 'class': 'cbi-section-descr' }, _('Key registrations per region. Total: %d · Regions: %d · Refused: %d. A region that refuses often takes longer to connect.').format(total, sum.length, refused)),
+				E('div', { 'class': 'cbi-section-descr' }, _('Key registrations and token probes per region. Requests: %d · Regions: %d · Refused: %d. A region that refuses often takes longer to connect.').format(total, sum.length, refused)),
 				sumTable,
 				E('h4', { 'style': 'margin-top:1.5em' }, _('Event history')),
-				E('div', { 'class': 'cbi-section-descr' }, _('Newest first: registrations, fastest-region pings, tunnel confirmations and guard actions. Events shown: %d.').format(rows.length)),
+				E('div', { 'class': 'cbi-section-descr' }, _('Newest first: registrations, token probes, fastest-region pings, tunnel confirmations and guard actions. Events shown: %d.').format(rows.length)),
 				E('div', { 'style': 'max-height:22em;overflow:auto' }, detail)
 			]);
 		});

@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.10.1 (upstream 1.0.16)
+1.10.2 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -222,7 +222,7 @@ A confirm run that does nothing says why, in one line: `Command skipped (ifup wl
 Firmware upgrades and LuCI backups: `renew install` and `luci install` add the hook and the LuCI app files to `/etc/sysupgrade.conf` under `## PIA VPN (kept by pia.sh)` (only the lines that are missing; `luci remove` and `renew remove` take theirs out). `/etc/config/pia`, the network and firewall configuration and the cron entries are kept by OpenWrt already; the session key (RAM), the cache and the log are not meant to be kept.
 
 ## History
-`history.json` in the cache path records what happened with the servers: key registrations (server, HTTP code, time taken, accepted or refused), the pings of the fastest-region choice, tunnel confirmations and guard actions, each with country, region, server IP, latency and status (never tokens or keys). Entries are collected in RAM and written once when a run ends, to the cache path only (RAM if the USB drive is not mounted), and the file keeps the latest 200. `pia.sh api history` prints it with a per-region summary; LuCI shows both under *History* on the PIA VPN page. A region whose servers refuse a share of the registrations at random (uk_manchester refused about 60% of the requests in a 2026-10-16 measurement) is easy to see there.
+`history.json` in the cache path records what happened with the servers: key registrations (server, HTTP code, time taken, accepted or refused), the pings of the fastest-region choice, tunnel confirmations and guard actions, each with country, region, server IP, latency and status (never tokens or keys). Entries are collected in RAM and written once when a run ends, to the cache path only (RAM if the USB drive is not mounted), and the file keeps the latest 200. `pia.sh api history` prints it with a per-region summary; LuCI shows both under *History* on the PIA VPN page. `pia.sh history probe [--rounds N] [--delay S] REGION|COUNTRY…` (for example `history probe GB`) asks the servers of the regions whether they accept the VPN token, N times (default 8, 3 s apart), with an invalid public key: nothing is registered, and the servers in use by an interface are skipped (a request removes the key the token has on that server). Each answer is recorded as a *Token probe* and counted in the region summary. A region whose servers refuse a share of the registrations at random (uk_manchester refused about 60% of the requests in a 2026-10-16 measurement) is easy to see there.
 
 `luci install` and the first interface made from LuCI install the cache refresh and renew cron entries when they are missing (and the guard; a retired watchdog's entries are removed).
 
