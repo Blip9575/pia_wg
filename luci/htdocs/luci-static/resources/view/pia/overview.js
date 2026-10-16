@@ -24,7 +24,7 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_block: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_zones: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1 }
 });
 function callSave(args) {
 	const o = {};
@@ -605,10 +605,10 @@ return view.extend({
 		const fwd = adding ? (st.lan_zone ? [ st.lan_zone ] : []) : i.forward;
 		const boxes = zones.map(z => [ z, checkbox(fwd.indexOf(z) >= 0) ]);
 		const ks = adding ? {} : (i.killswitch || {});
-		const ksSel = ks.enabled && ks.block.length ? ks.block : (st.wan_zones || []);
-		const ksBoxes = zones.map(z => [ z, checkbox(ksSel.indexOf(z) >= 0) ]);
+		const ksSel = ks.enabled && ks.zones.length ? ks.zones : (st.lan_zone ? [ st.lan_zone ] : []);
+		const ksBoxes = zones.filter(z => (st.wan_zones || []).indexOf(z) < 0).map(z => [ z, checkbox(ksSel.indexOf(z) >= 0) ]);
 		const ksList = E('div', ksBoxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ])));
-		const ksBox = field(_('Block forwarding to'), ksList, _('The zones that lead to the internet without the VPN. Forwarding from the zones above to these is removed, and put back when the kill switch is turned off.'));
+		const ksBox = field(_('Zones to be isolated'), ksList, _('Select zones to be isolated when VPN is down'));
 		const ksCb = checkbox(!!ks.enabled, () => { ksBox.style.display = ksCb.checked ? '' : 'none'; });
 		ksBox.style.display = ks.enabled ? '' : 'none';
 
@@ -649,10 +649,10 @@ return view.extend({
 					return problem(_('Keepalive: digits only, 1 to 65535'));
 			}
 			if (ksCb.checked) {
-				if (!fwCb.checked || !boxes.some(b => b[1].checked))
-					return problem(_('The kill switch needs the firewall zone and a zone to allow forwarding from'));
+				if (!fwCb.checked)
+					return problem(_('The kill switch needs the firewall zone'));
 				if (!ksBoxes.some(b => b[1].checked))
-					return problem(_('The kill switch needs a zone to block forwarding to'));
+					return problem(_('The kill switch needs a zone to isolate'));
 			}
 			if (pfCb.checked) {
 				if (pfIp.value.trim() && !IPV4.test(pfIp.value.trim()))
@@ -676,7 +676,7 @@ return view.extend({
 				firewall: fwCb.checked ? 'yes' : 'no',
 				forward: fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
 				killswitch: ksCb.checked ? 'yes' : 'no',
-				ks_block: ksCb.checked ? ksBoxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
+				ks_zones: ksCb.checked ? ksBoxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
 				portfwd: pfCb.checked ? 'yes' : 'no',
 				pf_ip: pfCb.checked ? pfIp.value.trim() : null,
 				pf_port: pfCb.checked ? pfPort.value : null,
@@ -719,7 +719,7 @@ return view.extend({
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('The zones whose traffic may go through this VPN.')),
-				field(_('Kill switch'), ksCb, _('Block devices from reaching the internet except through this VPN. Needs the firewall zone and a zone to allow forwarding from')),
+				field(_('Kill switch'), ksCb, _('Zones to be isolated when VPN is down')),
 				ksBox,
 				field(_('Port forwarding'), pfCb, _('Enable Port forwarding')),
 				pfBox,
