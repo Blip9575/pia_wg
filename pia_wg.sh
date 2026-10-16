@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.14.0
+# Version: 1.14.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2174,11 +2174,19 @@ ask_keepalive() {
   uci -q commit pia
 }
 
+# Does the interface use the default packet size (follows the WAN)? Chosen with mtu_auto 1; an
+# interface from before that flag (none) with the 1420 PIA's servers use counts as default too
+mtu_is_auto() {
+  MAV="$(uci -q get "pia.$PIAWG_IF.mtu_auto")"
+  [ "$MAV" = '1' ] && return 0
+  [ -z "$MAV" ] && [ "$(uci -q get "pia.$PIAWG_IF.iface_mtu")" = "$PIA_MTU_MAX" ]
+}
+
 # The default packet size follows the WAN: when the WAN's MTU changed (a different network),
 # the running tunnel gets the new value at once (not written to the flash; a restart
 # starts from the stored value and this corrects it)
 mtu_sync() {
-  [ "$(uci -q get "pia.$PIAWG_IF.mtu_auto")" = '1' ] || return 0
+  mtu_is_auto || return 0
   [ -d "/sys/class/net/$PIAWG_IF" ] || return 0
   std_mtu_calc
   MSW="$STDMTU"
@@ -2214,7 +2222,7 @@ ask_mtu() {
       ;;
     2)
       uci -q set "pia.$PIAWG_IF.iface_mtu=$PIA_MTU_SMALL"
-      uci -q delete "pia.$PIAWG_IF.mtu_auto"
+      uci -q set "pia.$PIAWG_IF.mtu_auto=0"
       break
       ;;
     3)
@@ -2222,7 +2230,7 @@ ask_mtu() {
       read -r AMC || AMC=''
       if valid_mtu "$AMC"; then
         uci -q set "pia.$PIAWG_IF.iface_mtu=$AMC"
-        uci -q delete "pia.$PIAWG_IF.mtu_auto"
+        uci -q set "pia.$PIAWG_IF.mtu_auto=0"
         break
       fi
       echo "Invalid packet size: '$AMC'"
@@ -4021,7 +4029,7 @@ api_iface_json() {
     --arg proto "$PIAPROTO" --argjson auto "$AIAUTO" \
     --arg dnsip "$(dns_hosts)" --argjson mace "$AIMACE" \
     --arg mtu "$(uci -q get "pia.$PIAWG_IF.iface_mtu")" \
-    --arg mtuauto "$(uci -q get "pia.$PIAWG_IF.mtu_auto")" \
+    --arg mtuauto "$(mtu_is_auto && echo 1)" \
     --arg mturun "$([ "$AIUP" = true ] && cat "/sys/class/net/$PIAWG_IF/mtu" 2>/dev/null)" \
     --arg keep "$(uci -q get "pia.$PIAWG_IF.peer_persistent_keepalive")" \
     --argjson custom "$AICUSTOM" \
@@ -4414,12 +4422,12 @@ api_iface_save() {
     ;;
   small)
     uci -q set "pia.$AN.iface_mtu=$PIA_MTU_SMALL"
-    uci -q delete "pia.$AN.mtu_auto"
+    uci -q set "pia.$AN.mtu_auto=0"
     ;;
   '') ;;
   *)
     uci -q set "pia.$AN.iface_mtu=$A_MTU"
-    uci -q delete "pia.$AN.mtu_auto"
+    uci -q set "pia.$AN.mtu_auto=0"
     ;;
   esac
   case "$A_KEEP" in
