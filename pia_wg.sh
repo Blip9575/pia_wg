@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.12.5
+# Version: 1.13.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2412,7 +2412,8 @@ persist_batch() {
   # not started by netifd at boot unless asked (iface_auto=1): something else (travelmate,
   # the hook or the user) decides, and a tunnel started before its session is registered
   # only runs keyless
-  [ "$(uci -q get "pia.$PIAWG_IF.iface_auto")" = '1' ] || echo "set network.$PIAWG_IF.auto=0"
+  # (with a boot delay the hook starts it, once the router has been up for that long)
+  { [ "$(uci -q get "pia.$PIAWG_IF.iface_auto")" = '1' ] && [ "$(uci -q get "pia.$PIAWG_IF.boot_delay" || echo 0)" -le 0 ]; } || echo "set network.$PIAWG_IF.auto=0"
   # the interface's iface_* options go to the network interface, peer_* to the peer
   uci export pia | awk -v qn="'$PIAWG_IF'" -v one="'1'" -v ni="network.$PIAWG_IF" -v np="network.$PIAWG_PEER" '
     $1=="config"{d=($2=="interface" && $3==qn); next}
@@ -2985,6 +2986,7 @@ boot_summary() {
     if session_valid; then BSK='yes'; else BSK='no'; fi
     BSB='no'
     [ "$(uci -q get "pia.$BSX.iface_auto")" = '1' ] && BSB='yes'
+    [ "$BSB" = 'yes' ] && [ "$(uci -q get "pia.$BSX.boot_delay" || echo 0)" -gt 0 ] && BSB="yes, after $(uci -q get "pia.$BSX.boot_delay")s"
     BSLINE="$BSLINE; $BSX: session key $BSK, bring up on boot $BSB"
   done
   PIAWG_IF="$BSSAVE"
@@ -3684,11 +3686,32 @@ renew_remove() {
 # Called by the hotplug hook: hook ifup|ifdown <interface that changed>
 # (the endpoint route is deliberately left in place when the interface goes
 # down, so that the next ifup finds it)
+# Once per boot, at the first interface that comes up: bring up the interfaces that have
+# a boot delay when the router has been up for that many seconds (netifd does not
+# start them: their network auto is 0)
+boot_delay_run() {
+  mkdir "$RUNDIR/boot.delay" 2>/dev/null || return 0
+  BDUP="$(cut -d. -f1 /proc/uptime)"
+  for BDX in $(iface_list); do
+    [ "$(uci -q get "pia.$BDX.iface_auto")" = '1' ] || continue
+    BDD="$(uci -q get "pia.$BDX.boot_delay")"
+    [ "${BDD:-0}" -gt 0 ] 2>/dev/null || continue
+    BDW=$((BDD - BDUP))
+    [ "$BDW" -gt 0 ] || BDW=0
+    echo "Boot: $BDX is brought up in ${BDW}s (${BDD}s after boot)" >&3
+    (
+      sleep "$BDW"
+      [ "$(ubus call "network.interface.$BDX" status 2>/dev/null | jsonfilter -e '@.up')" = 'true' ] || ifup "$BDX"
+    ) >/dev/null 2>&1 3>&- &
+  done
+}
+
 hook_cmd() {
   case "$1" in
   ifup) ;;
   *) return 0 ;;
   esac
+  boot_delay_run
   if iface_exists "$2"; then
     PIAWG_IF="$2"
     set_ifvars
@@ -3975,6 +3998,7 @@ api_iface_json() {
     --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
     --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
     --arg boot "$(uci -q get "pia.$PIAWG_IF.iface_auto")" \
+    --arg bdelay "$(uci -q get "pia.$PIAWG_IF.boot_delay")" \
     --arg kse "$(uci -q get "pia.$PIAWG_IF.ks_enable")" \
     --arg ksb "$(uci -q get "pia.$PIAWG_IF.ks_wan")" \
     --arg ksl "$(ks_leaks | tr '\n' ' ')" \
@@ -3992,7 +4016,7 @@ api_iface_json() {
       streaming: ($rdns | contains("-so.")),
       mtu: ($mtu | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
-      dip: ($dip != ""), boot: ($boot == "1"),
+      dip: ($dip != ""), boot: ($boot == "1"), boot_delay: ($bdelay | tonumber? // 0),
       killswitch: {enabled: ($kse == "1"), wan: ($ksb | split(" ") | map(select(. != ""))), leaks: ($ksl | split(" ") | map(select(. != "")))},
       portfwd: {enabled: ($pfe == "1"), ip: $pfip, dest_port: ($pfdp | tonumber? // null), port: ($pfport | tonumber? // null), capable: ($pfcap != "false")}, up: $up, handshake: ($hs | tonumber? // null),
       endpoint: ($ep | if . == "" then null else . end), job: $job}'
@@ -4150,12 +4174,12 @@ api_job() {
 #   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
 #   killswitch=yes|no  ks_wan="<zones>" (the WAN zones: the forwardings from the allowed zones to these are removed; default the br-wan zone)
 #   portfwd=yes|no  pf_ip=<IPv4 behind the router>  pf_port=<port there; empty: the forwarded one>
-#   boot=yes|no (netifd starts it at boot)  forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
+#   boot=yes|no (netifd starts it at boot)  boot_delay=<0-3600 seconds after boot: the hook starts it instead>  forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
 api_iface_save() {
   AN="$1"
   shift
   valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
-  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET='' A_KS='' A_KSB='' A_KSSET=''
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET='' A_KS='' A_KSB='' A_KSSET='' A_BD='' A_BDSET=''
   for AKV in "$@"; do
     AV="${AKV#*=}"
     case "$AKV" in
@@ -4174,6 +4198,10 @@ api_iface_save() {
       ;;
     strict=*) A_STRICT="$AV" ;;
     boot=*) A_BOOT="$AV" ;;
+    boot_delay=*)
+      A_BD="$AV"
+      A_BDSET=1
+      ;;
     portfwd=*) A_PF="$AV" ;;
     killswitch=*) A_KS="$AV" ;;
     ks_wan=*)
@@ -4203,6 +4231,15 @@ api_iface_save() {
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_BOOT" in '' | yes | no) ;; *) api_fail "Invalid boot choice" ;; esac
   case "$A_PF" in '' | yes | no) ;; *) api_fail "Invalid port forwarding choice" ;; esac
+  case "$A_BD" in
+  '') ;;
+  *[!0-9]*) api_fail "Boot delay: digits only, 0 to 3600 seconds" ;;
+  *) [ "$A_BD" -le 3600 ] || api_fail "Boot delay: digits only, 0 to 3600 seconds" ;;
+  esac
+  if [ "${A_BD:-0}" -gt 0 ]; then
+    [ "$A_BOOT" != 'no' ] || api_fail "A boot delay needs Bring up on boot"
+    [ -x "$HOOKFILE" ] || api_fail "A boot delay needs the ifup hook (pia.sh renew install): it brings the interface up"
+  fi
   case "$A_KS" in '' | yes | no) ;; *) api_fail "Invalid kill switch choice" ;; esac
   for AZ in $A_KSB; do
     case "$AZ" in *[!A-Za-z0-9_-]*) api_fail "Invalid zone name" ;; esac
@@ -4387,7 +4424,14 @@ api_iface_save() {
   yes) uci -q set "pia.$AN.iface_auto=1" ;;
   no) uci -q set "pia.$AN.iface_auto=0" ;;
   esac
-  if [ -n "$A_BOOT" ] || [ -n "$AWNEW" ]; then
+  # the boot delay (off with the boot option)
+  if [ "$A_BOOT" = 'no' ]; then
+    uci -q delete "pia.$AN.boot_delay"
+  elif [ -n "$A_BDSET" ]; then
+    if [ "${A_BD:-0}" -gt 0 ] && [ "$(uci -q get "pia.$AN.iface_auto")" != '1' ]; then api_fail "A boot delay needs Bring up on boot"; fi
+    if [ "${A_BD:-0}" -gt 0 ]; then uci -q set "pia.$AN.boot_delay=$A_BD"; else uci -q delete "pia.$AN.boot_delay"; fi
+  fi
+  if [ -n "$A_BOOT" ] || [ -n "$A_BDSET" ] || [ -n "$AWNEW" ]; then
     uci -q commit pia
     NETCHANGED='' SESSCHANGED=''
     ensure_iface

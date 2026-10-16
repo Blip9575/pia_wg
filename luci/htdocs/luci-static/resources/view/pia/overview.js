@@ -24,7 +24,7 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_wan: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_wan: 1, boot_delay: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1 }
 });
 function callSave(args) {
 	const o = {};
@@ -589,7 +589,11 @@ return view.extend({
 			routeCb.checked = !adding && i.default_route;
 		}
 		const fwCb = checkbox(adding ? true : i.firewall);
-		const bootCb = checkbox(adding ? false : i.boot);
+		const bdInp = E('input', { 'class': 'cbi-input-text', 'type': 'number', 'min': 0, 'max': 3600, 'step': 1, 'style': 'width:7em',
+			'value': String(adding ? 0 : (i.boot_delay || 0)) });
+		const bdBox = field(_('Delay before bring up'), bdInp, _('Seconds after the router starts; 0 brings it up as soon as the network starts. Needs the ifup hook.'));
+		const bootCb = checkbox(adding ? false : i.boot, () => { bdBox.style.display = bootCb.checked ? '' : 'none'; });
+		bdBox.style.display = !adding && i.boot ? '' : 'none';
 		const pf = adding ? {} : (i.portfwd || {});
 		const pfIp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'maxlength': 15, 'size': 16, 'spellcheck': 'false',
 			'placeholder': _('IPv4 address'), 'value': pf.ip || '' });
@@ -650,6 +654,8 @@ return view.extend({
 				if (!/^[0-9]+$/.test(keepInp.value) || k < 1 || k > 65535)
 					return problem(_('Keepalive: digits only, 1 to 65535'));
 			}
+			if (bootCb.checked && (!/^[0-9]+$/.test(bdInp.value.trim() || '0') || +bdInp.value > 3600))
+				return problem(_('Delay before bring up: 0 to 3600 seconds'));
 			if (ksCb.checked) {
 				if (!fwCb.checked)
 					return problem(_('The kill switch needs the firewall zone'));
@@ -684,7 +690,8 @@ return view.extend({
 				portfwd: pfCb.checked ? 'yes' : 'no',
 				pf_ip: pfCb.checked ? pfIp.value.trim() : null,
 				pf_port: pfCb.checked ? pfPort.value : null,
-				boot: bootCb.checked ? 'yes' : 'no'
+				boot: bootCb.checked ? 'yes' : 'no',
+				boot_delay: bootCb.checked ? String(+bdInp.value || 0) : null
 			}).then(r => {
 				ui.hideModal();
 				if (!r || !r.ok) return fail(r);
@@ -728,6 +735,7 @@ return view.extend({
 				field(_('Port forwarding'), pfCb, _('Enable Port forwarding')),
 				pfBox,
 				field(_('Bring up on boot'), bootCb, _('Enable to connect on boot')),
+				bdBox,
 				err,
 				E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ' ].concat(buttons))
 			]));
