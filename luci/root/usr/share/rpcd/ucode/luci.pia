@@ -128,14 +128,14 @@ const methods = {
 		args: {
 			name: 'name', proto: 'proto', region: 'region', fast: 'fast', dns: 'dns',
 			dns_ip: 'dns_ip', mtu: 'mtu', keepalive: 'keepalive', route: 'route',
-			firewall: 'firewall', forward: 'forward', killswitch: 'killswitch', ks_zones: 'ks_zones', portfwd: 'portfwd', pf_ip: 'pf_ip', pf_port: 'pf_port', strict: 'strict', boot: 'boot'
+			firewall: 'firewall', forward: 'forward', killswitch: 'killswitch', ks_wan: 'ks_wan', portfwd: 'portfwd', pf_ip: 'pf_ip', pf_port: 'pf_port', strict: 'strict', boot: 'boot'
 		},
 		call: function(request) {
 			let a = request.args;
 			if (!okname(a.name))
 				return { ok: false, error: 'Invalid interface name' };
 			let args = [ 'api', 'iface-save', a.name ];
-			for (let k in [ 'proto', 'region', 'fast', 'dns', 'dns_ip', 'mtu', 'keepalive', 'route', 'firewall', 'forward', 'killswitch', 'ks_zones', 'portfwd', 'pf_ip', 'pf_port', 'strict', 'boot' ])
+			for (let k in [ 'proto', 'region', 'fast', 'dns', 'dns_ip', 'mtu', 'keepalive', 'route', 'firewall', 'forward', 'killswitch', 'ks_wan', 'portfwd', 'pf_ip', 'pf_port', 'strict', 'boot' ])
 				if (a[k] != null)
 					push(args, k + '=' + a[k]);
 			return run(args);
