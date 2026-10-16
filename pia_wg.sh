@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.12.3
+# Version: 1.12.4
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1510,10 +1510,19 @@ fw_lan_zone() {
   done
 }
 
-# The WAN zones: attached to br-wan, masquerading, no VPN protocol (and not br-lan)
+# The WAN zones: attached to br-wan or masquerading, no VPN protocol (and not br-lan)
 fw_wan_zones() {
-  for FWZ2 in $(fw_zone_of_dev br-wan); do
-    fw_zone_masq "$FWZ2" && ! fw_zone_is_vpn "$FWZ2" && ! fw_zone_devs "$FWZ2" | grep -qxF br-lan && echo "$FWZ2"
+  for FWZ2 in $(fw_zone_names); do
+    fw_zone_is_vpn "$FWZ2" && continue
+    fw_zone_devs "$FWZ2" | grep -qxF br-lan && continue
+    if fw_zone_masq "$FWZ2" || fw_zone_devs "$FWZ2" | grep -qxF br-wan; then echo "$FWZ2"; fi
+  done
+}
+
+# The WAN zones the kill switch starts with: the ones attached to br-wan
+fw_wan_default() {
+  for FWZ2 in $(fw_wan_zones); do
+    fw_zone_devs "$FWZ2" | grep -qxF br-wan && echo "$FWZ2"
   done
 }
 
@@ -4209,7 +4218,7 @@ api_iface_save() {
       if [ -n "$A_FWDSET" ]; then AKSRC="$A_FWD"; else AKSRC="$(uci -q get "pia.$AN.fw_forward")"; fi
       [ -n "$AKSRC" ] || [ -n "$A_FWDSET" ] || iface_exists "$AN" || AKSRC="$(fw_lan_zone)"
       if [ -n "$A_KSSET" ]; then AKZ="$A_KSB"; else AKZ="$(uci -q get "pia.$AN.ks_wan")"; fi
-      [ -n "$AKZ" ] || [ -n "$A_KSSET" ] || AKZ="$(fw_wan_zones | tr '\n' ' ')"
+      [ -n "$AKZ" ] || [ -n "$A_KSSET" ] || AKZ="$(fw_wan_default | tr '\n' ' ')"
       if [ "$A_FW" = 'no' ]; then
         [ "$A_KS" = 'yes' ] && api_fail "The kill switch needs the firewall zone"
         A_KS=no
@@ -4391,7 +4400,7 @@ api_iface_save() {
   if [ "$(uci -q get "pia.$AN.ks_enable")" = '1' ]; then
     if [ -n "$A_KSSET" ] || [ -z "$(uci -q get "pia.$AN.ks_wan")" ]; then
       uci -q delete "pia.$AN.ks_wan"
-      for AZ in ${A_KSB:-$(fw_wan_zones)}; do uci -q add_list "pia.$AN.ks_wan=$AZ"; done
+      for AZ in ${A_KSB:-$(fw_wan_default)}; do uci -q add_list "pia.$AN.ks_wan=$AZ"; done
     fi
   fi
   uci -q commit pia
