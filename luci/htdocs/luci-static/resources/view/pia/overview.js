@@ -148,7 +148,7 @@ function withInput(ctl, input) {
 // the packet sizes: standard follows the WAN (st.std_mtu), the others are fixed
 function mtuOpts(st) {
 	return [
-		[ 'std', _('Default (%d)').format(st.std_mtu), _('Recommended: the size PIA\'s apps use') ],
+		[ 'std', _('Default (%d)').format(st.std_mtu), _('Recommended: follows the WAN connection (its MTU minus 60, at most 1420)') ],
 		[ 'small', _('Small (%d)').format(st.small_mtu), _('Improve compatibility for mobile networks') ],
 		[ 'custom', _('Custom'), _('Provide MTU value') ]
 	];
@@ -337,7 +337,7 @@ return view.extend({
 	settingsCell: function(i) {
 		const parts = [];
 		parts.push(dnsLabel(this.st, i.dns_ip));
-		parts.push(_('MTU %s').format(i.mtu || _('default')));
+		parts.push(i.mtu_auto && i.mtu_run ? _('MTU %s (follows the WAN)').format(i.mtu_run) : _('MTU %s').format(i.mtu || _('default')));
 		if (i.keepalive != null && i.keepalive != KEEPALIVE) parts.push(i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive'));
 		parts.push(i.default_route ? _('default route') : _('no default route'));
 		if (i.firewall) parts.push(_('zone %s').format(i.name) + (i.forward.length ? ' ← ' + i.forward.join(', ') : ''));
@@ -574,8 +574,8 @@ return view.extend({
 			'placeholder': _('IPv4 address'), 'value': !adding && i.dns == 'custom' ? i.dns_ip : '', 'style': 'margin-top:.4em' });
 		const dnsBox = withInput(dnsCtl, dnsInp);
 		const cur = adding ? 0 : i.mtu;
-		const isCustom = cur && cur != st.std_mtu && cur != st.small_mtu;
-		const mtuCtl = selectHelp(mtuOpts(st), !cur || cur == st.std_mtu ? 'std' : cur == st.small_mtu ? 'small' : 'custom');
+		const isCustom = cur && !i.mtu_auto && cur != st.std_mtu && cur != st.small_mtu;
+		const mtuCtl = selectHelp(mtuOpts(st), !cur || i.mtu_auto || cur == st.std_mtu ? 'std' : cur == st.small_mtu ? 'small' : 'custom');
 		const mtuInp = numInput(isCustom ? cur : '', _('%d to %d').format(MTU_MIN, MTU_MAX));
 		const mtuBox = withInput(mtuCtl, mtuInp);
 		const ka = adding || i.keepalive == null || i.keepalive == KEEPALIVE ? 'default' : i.keepalive == 0 ? 'off' : 'custom';

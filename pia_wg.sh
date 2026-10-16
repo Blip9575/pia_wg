@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.13.1
+# Version: 1.14.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -44,7 +44,7 @@ PIA_DNS_MACE='10.0.0.244'
 PIA_DNS_SO_MACE='10.0.0.241'
 PIA_MTU_SMALL=1280   # the Android app's 'small packets' WireGuard MTU
 PIA_MTU_MAX=1420     # the largest custom packet size: PIA's servers use 1420 on their side (measured 2026-10-15: they fragment larger replies), so more gains nothing
-PIA_MTU_OVERHEAD=80  # WAN MTU minus this = PIA's standard (the desktop app, 1420 on 1500)
+PIA_MTU_OVERHEAD=60  # WireGuard over IPv4: 20 (IP) + 8 (UDP) + 32 (WireGuard); the WAN's MTU minus this, at most PIA_MTU_MAX, is the default (1420 on 1500)
 PIA_KEEPALIVE=25     # the official apps' PersistentKeepalive
 PIA_MTU_MIN=1280     # custom packet size: the smallest the apps offer
 # AmneziaWG obfuscation used when the server sends none (as the official app)
@@ -2079,8 +2079,15 @@ ask_dns() {
   echo "DNS server: $(uci -q get "pia.$PIAWG_IF.iface_dns")"
 }
 
-# The tunnel MTU PIA's apps use: the WAN's minus 80 (1420 on 1500)
+# The default tunnel MTU: the WAN's minus 60 (WireGuard over IPv4), at most 1420 (what PIA's
+# servers use), at least 1280
 std_mtu() {
+  std_mtu_calc
+  echo "$STDMTU"
+}
+
+# (sets STDMTU and SMD, the WAN device it came from)
+std_mtu_calc() {
   pia_wan
   SMD="$WANDEV"
   [ -n "$SMD" ] || SMD="$(ip -4 route show default | awk -v t="$PIAIFS" '{for(i=1;i<NF;i++) if($i=="dev" && index(t, " " $(i+1) " ") == 0){print $(i+1); exit}}')"
@@ -2089,7 +2096,10 @@ std_mtu() {
   '' | *[!0-9]*) SMM=1500 ;;
   esac
   [ "$SMM" -le 1500 ] || SMM=1500
-  echo $((SMM - PIA_MTU_OVERHEAD))
+  SMM=$((SMM - PIA_MTU_OVERHEAD))
+  [ "$SMM" -le "$PIA_MTU_MAX" ] || SMM=$PIA_MTU_MAX
+  [ "$SMM" -ge "$PIA_MTU_MIN" ] || SMM=$PIA_MTU_MIN
+  STDMTU="$SMM"
 }
 
 # Is $1 a custom packet size (digits only, 1280 to 1420)?
@@ -2164,6 +2174,21 @@ ask_keepalive() {
   uci -q commit pia
 }
 
+# The default packet size follows the WAN: when the WAN's MTU changed (a different network),
+# the running tunnel gets the new value at once (not written to the flash; a restart
+# starts from the stored value and this corrects it)
+mtu_sync() {
+  [ "$(uci -q get "pia.$PIAWG_IF.mtu_auto")" = '1' ] || return 0
+  [ -d "/sys/class/net/$PIAWG_IF" ] || return 0
+  std_mtu_calc
+  MSW="$STDMTU"
+  MSC="$(cat "/sys/class/net/$PIAWG_IF/mtu" 2>/dev/null)"
+  [ -n "$MSC" ] && [ "$MSW" != "$MSC" ] || return 0
+  if ip link set dev "$PIAWG_IF" mtu "$MSW" 2>/dev/null; then
+    echo "MTU: tunnel $MSC -> $MSW (the WAN $SMD has $(cat "/sys/class/net/$SMD/mtu" 2>/dev/null))" >&3
+  fi
+}
+
 # Packet size: PIA's standard one, small or a custom one
 ask_mtu() {
   [ -z "$AUTO" ] || return 0
@@ -2184,10 +2209,12 @@ ask_mtu() {
     case "$AMR" in
     1)
       uci -q set "pia.$PIAWG_IF.iface_mtu=$AMSTD"
+      uci -q set "pia.$PIAWG_IF.mtu_auto=1"
       break
       ;;
     2)
       uci -q set "pia.$PIAWG_IF.iface_mtu=$PIA_MTU_SMALL"
+      uci -q delete "pia.$PIAWG_IF.mtu_auto"
       break
       ;;
     3)
@@ -2195,6 +2222,7 @@ ask_mtu() {
       read -r AMC || AMC=''
       if valid_mtu "$AMC"; then
         uci -q set "pia.$PIAWG_IF.iface_mtu=$AMC"
+        uci -q delete "pia.$PIAWG_IF.mtu_auto"
         break
       fi
       echo "Invalid packet size: '$AMC'"
@@ -3720,6 +3748,7 @@ hook_cmd() {
     # up with nothing registered: make the session, which restarts it
     session_staged || /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" renew --if-missing --apply
     CONFIRM_BY="ifup $2" /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" confirm
+    mtu_sync
   else
     # another interface: a WAN that came back may need our session and a new gateway
     for HX in $(iface_list); do
@@ -3733,6 +3762,7 @@ hook_cmd() {
       HEP="$(sget "network.$PIAWG_PEER.endpoint_host")"
       [ -n "$HEP" ] && endpoint_route "$HEP" pin
       CONFIRM_BY="ifup $2" /bin/sh "$SCRIPTPATH" -i "$HX" confirm
+      mtu_sync
     done
   fi
   return 0
@@ -3991,6 +4021,8 @@ api_iface_json() {
     --arg proto "$PIAPROTO" --argjson auto "$AIAUTO" \
     --arg dnsip "$(dns_hosts)" --argjson mace "$AIMACE" \
     --arg mtu "$(uci -q get "pia.$PIAWG_IF.iface_mtu")" \
+    --arg mtuauto "$(uci -q get "pia.$PIAWG_IF.mtu_auto")" \
+    --arg mturun "$([ "$AIUP" = true ] && cat "/sys/class/net/$PIAWG_IF/mtu" 2>/dev/null)" \
     --arg keep "$(uci -q get "pia.$PIAWG_IF.peer_persistent_keepalive")" \
     --argjson custom "$AICUSTOM" \
     --argjson route "$AIDR" \
@@ -4014,7 +4046,7 @@ api_iface_json() {
       fast: ($fast == "1"), proto: $proto, auto: ($auto == 1),
       dns: (if $custom == 1 then "custom" elif $mace == 1 then "mace" else "standard" end), dns_ip: $dnsip,
       streaming: ($rdns | contains("-so.")),
-      mtu: ($mtu | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
+      mtu: ($mtu | tonumber? // null), mtu_auto: ($mtuauto == "1"), mtu_run: ($mturun | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
       dip: ($dip != ""), boot: ($boot == "1"), boot_delay: ($bdelay | tonumber? // 0),
       killswitch: {enabled: ($kse == "1"), wan: ($ksb | split(" ") | map(select(. != ""))), leaks: ($ksl | split(" ") | map(select(. != "")))},
@@ -4376,10 +4408,19 @@ api_iface_save() {
   # the PIA DNS host or the custom one is what the tunnel carries without the default route
   if [ -n "$A_DNS" ] && ! has_default_route "$AN"; then set_default_route no; fi
   case "$A_MTU" in
-  std) uci -q set "pia.$AN.iface_mtu=$(std_mtu)" ;;
-  small) uci -q set "pia.$AN.iface_mtu=$PIA_MTU_SMALL" ;;
+  std)
+    uci -q set "pia.$AN.iface_mtu=$(std_mtu)"
+    uci -q set "pia.$AN.mtu_auto=1"
+    ;;
+  small)
+    uci -q set "pia.$AN.iface_mtu=$PIA_MTU_SMALL"
+    uci -q delete "pia.$AN.mtu_auto"
+    ;;
   '') ;;
-  *) uci -q set "pia.$AN.iface_mtu=$A_MTU" ;;
+  *)
+    uci -q set "pia.$AN.iface_mtu=$A_MTU"
+    uci -q delete "pia.$AN.mtu_auto"
+    ;;
   esac
   case "$A_KEEP" in
   default) uci -q set "pia.$AN.peer_persistent_keepalive=$PIA_KEEPALIVE" ;;
