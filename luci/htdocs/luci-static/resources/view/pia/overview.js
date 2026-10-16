@@ -610,7 +610,7 @@ return view.extend({
 		const ksSel = ks.enabled && ks.wan.length ? ks.wan : (st.wan_zones || []).filter(z => (st.brwan_zones || []).indexOf(z) >= 0);
 		const ksBoxes = (st.wan_zones || []).filter(z => z != (adding ? '' : i.name)).map(z => [ z, checkbox(ksSel.indexOf(z) >= 0) ]);
 		const ksList = E('div', ksBoxes.length ? ksBoxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ])) : _('No WAN zone found (attached to br-wan or masquerading, not a VPN)'));
-		const ksBox = field(_('WAN zones'), ksList, _('Select WAN zone to be removed'));
+		const ksBox = field(_('WAN zones'), ksList, _('Select WAN connections to be removed so to isolate selected internal networks'));
 		const ksCb = checkbox(!!ks.enabled, () => { ksBox.style.display = ksCb.checked ? '' : 'none'; });
 		ksBox.style.display = ks.enabled ? '' : 'none';
 
@@ -722,8 +722,8 @@ return view.extend({
 				field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : [ E('div', _('Recommended to send all traffic via PIA.')), E('div', _('Enables strict DNS to prevent DNS leakage')) ]),
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
-					_('The zones whose traffic may go through this VPN.')),
-				field(_('Kill switch'), ksCb, _('Zones to be isolated when VPN is down')),
+					_('Select internal networks permitted to route traffic via VPN.')),
+				field(_('Kill switch'), ksCb, _('Enable to isolate selected internal networks when VPN is down')),
 				ksBox,
 				field(_('Port forwarding'), pfCb, _('Enable Port forwarding')),
 				pfBox,
