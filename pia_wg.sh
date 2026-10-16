@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.9.7
+# Version: 1.10.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -219,7 +219,59 @@ lock_take() {
 
 # Remove what this run created (the lock only if it holds it)
 # shellcheck disable=SC2329  # Function is used in trap below
+# History of what happened with the servers (history.json in the cache path):
+# key registrations, fastest-region pings, tunnel confirmations, guard actions.
+# Entries wait in a RAM list and are written once when the run ends (one small
+# write to the cache path, kept to the latest HISTMAX entries); no secrets.
+HISTMAX=200
+history_file() { echo "$(cache_dir)/history.json"; }
+# history_add EVENT STATUS IP NAME MS NOTE [REGION_ID]
+history_add() {
+  jq -nc --argjson t "$(date +%s)" --arg ifn "$PIAWG_IF" --arg ev "$1" --arg st "$2" --arg ip "$3" --arg cn "$4" \
+    --arg ms "$5" --arg note "$6" --arg rid "${7:-$(uci -q get "pia.$PIAWG_IF.region_id")}" --arg proto "$PIAPROTO" \
+    '{t: $t, if: $ifn, ev: $ev, status: $st, region_id: $rid, proto: $proto, ip: $ip, cn: $cn,
+      ms: (try ($ms | tonumber) catch null), note: $note}' >>"$RUNDIR/history.$$.pending" 2>/dev/null
+  return 0
+}
+history_flush() {
+  HFP="$RUNDIR/history.$$.pending"
+  [ -s "$HFP" ] || return 0
+  HFW=0
+  while ! mkdir "$RUNDIR/history.lock" 2>/dev/null; do
+    HFW=$((HFW + 1))
+    if [ $HFW -gt 50 ]; then rmdir "$RUNDIR/history.lock" 2>/dev/null; break; fi
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  HFF="$(history_file)"
+  HFR="$(jq -c '[.regions[] | {key: .id, value: {country: .country, name: .name}}] | from_entries' "$(cache_dir)/servers.json" 2>/dev/null)"
+  [ -n "$HFR" ] || HFR='{}'
+  jq -e 'type == "array"' "$HFF" >/dev/null 2>&1 || echo '[]' >"$HFF.old"
+  [ -e "$HFF.old" ] || cp "$HFF" "$HFF.old"
+  if jq -cs --argjson rm "$HFR" --argjson max "$HISTMAX" \
+    '(.[0] + (.[1:] | map(. + {country: ($rm[.region_id].country // ""), region: ($rm[.region_id].name // .region_id)}))) | .[-$max:]' \
+    "$HFF.old" "$HFP" >"$HFF.new" 2>/dev/null && [ -s "$HFF.new" ]; then
+    mv "$HFF.new" "$HFF"
+  fi
+  rm -f "$HFF.old" "$HFF.new" "$HFP"
+  rmdir "$RUNDIR/history.lock" 2>/dev/null
+  return 0
+}
+api_history() {
+  HFF="$(history_file)"
+  if [ -s "$HFF" ] && jq -e 'type == "array"' "$HFF" >/dev/null 2>&1; then
+    jq -c '{ok: true, entries: (reverse | .[0:200]),
+      summary: ([.[] | select(.ev == "register")] | group_by(.region_id) | map(
+        (map(select(.status == "ok" and .ms != null) | .ms)) as $m
+        | {region_id: .[0].region_id, region: .[0].region, country: .[0].country, total: length,
+           refused: (map(select(.status == "refused")) | length), ok: (map(select(.status == "ok")) | length),
+           ms: (if ($m | length) > 0 then (($m | add) / ($m | length) | floor) else null end)}))}' "$HFF"
+  else
+    echo '{"ok":true,"entries":[],"summary":[]}'
+  fi
+}
+
 cleanup() {
+  history_flush
   [ -z "$BGPID" ] || kill "$BGPID" 2>/dev/null
   # files being written to replace cache files atomically
   [ -z "$PROBETMP" ] || rm -f "$PROBETMP"
@@ -1010,12 +1062,21 @@ $(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
   ADDKEYWHY='no server to ask'
   while read -r HOST CN MODE KPORT; do
     case "$MODE" in
-    'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$HOST:$KPORT" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:$KPORT/$KEYPATH")" ;;
-    'dns') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} -G "$@" --data-urlencode "pubkey=$PUB" "https://$HOST:$KPORT/$KEYPATH")" ;;
+    'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code} %{time_total}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$HOST:$KPORT" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:$KPORT/$KEYPATH")" ;;
+    'dns') CODE="$(curl -s -k -o "$PIARESP" -w '%{http_code} %{time_total}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} -G "$@" --data-urlencode "pubkey=$PUB" "https://$HOST:$KPORT/$KEYPATH")" ;;
     *) continue ;;
     esac
+    AKSEC="${CODE#* }"
+    CODE="${CODE%% *}"
     [ "$CODE" = '401' ] && ADDKEYAUTHFAIL=1
     PIAADDKEY="$(cat "$PIARESP")"
+    AKN=$((${AKN:-0} + 1))
+    if [ "$(echo "$PIAADDKEY" | jq -r '.status' 2>/dev/null)" = 'OK' ]; then
+      AKST='ok'
+    else
+      case "$CODE" in 401) AKST='refused' ;; 000) AKST='timeout' ;; *) AKST='failed' ;; esac
+    fi
+    history_add register "$AKST" "$HOST" "$CN" "$(echo "$AKSEC" | awk '{printf "%d", $1 * 1000}')" "HTTP ${CODE:-000}, try $AKN"
     # why the last server said no (shown by the retry lines)
     ADDKEYWHY="HTTP ${CODE:-000} from $CN"
     AKMSG="$(echo "$PIAADDKEY" | jq -r '.message // .status // empty' 2>/dev/null | tr -cd ' -~' | cut -c1-80)"
@@ -2484,8 +2545,17 @@ EOF
   # (not a plain wait: the log writer is a child too)
   # shellcheck disable=SC2086
   wait $FRPIDS
-  FRBEST="$(cat "$RUNDIR"/fast.$$.* 2>/dev/null | sort -n | head -n 1)"
+  FRALL="$(cat "$RUNDIR"/fast.$$.* 2>/dev/null)"
+  FRBEST="$(echo "$FRALL" | sort -n | head -n 1)"
   rm -f "$RUNDIR"/fast.$$.*
+  while read -r FRID FRIP; do
+    [ -n "$FRID" ] || continue
+    FRMS="$(echo "$FRALL" | awk -v id="$FRID" '$2 == id {printf "%d", $1 + 0.5}')"
+    if [ -n "$FRMS" ]; then FRST='ok'; else FRST='timeout'; fi
+    history_add fast "$FRST" "$FRIP" "" "$FRMS" "ping" "$FRID"
+  done <<EOF
+$FRL
+EOF
   [ -n "$FRBEST" ] || {
     echo "Fastest region: no answer to the pings; keeping $(uci -q get "pia.$PIAWG_IF.region_id")" >&3
     return 0
@@ -2892,6 +2962,7 @@ confirm_tunnel() {
   # at once (the WAN default route and its DNS serve meanwhile)
   if ! tunnel_handshake && ip -4 route show default dev "$PIAWG_IF" 2>/dev/null | grep -q .; then
     echo "Stage 2/2 (withdraw): no recent handshake: default route and DNS server withdrawn" >&3
+    history_add confirm withdrawn "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "no recent handshake: routes withdrawn"
     tunnel_update withdraw
   fi
   while :; do
@@ -2903,6 +2974,7 @@ confirm_tunnel() {
           echo "Stage 2/2 (apply): DNS server $(dns_hosts | awk '{print $1}') and its route applied" >&3
         fi
         rm -f "$RUNDIR/confirm.fail.$PIAWG_IF"
+        history_add confirm ok "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "handshake and DNS answer confirmed, routes applied"
         return 0
       fi
       CTWHY='the interface could not be updated'
@@ -2910,6 +2982,7 @@ confirm_tunnel() {
     CTA=$((CTA + 1))
     if [ $CTA -gt 3 ]; then
       date +%s >"$RUNDIR/confirm.fail.$PIAWG_IF"
+      history_add confirm failed "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "$CTWHY"
       echo "Error: Stage 1/2 (confirm) FAILED after 3 attempts (last: $CTWHY): the tunnel stays unconfirmed, the WAN keeps the default route; retried at the next hook or cron" >&3
       return 1
     fi
@@ -3025,6 +3098,8 @@ guard_cmd() {
   else
     echo "Guard: the interface is up without a handshake: running the ifup hook" >&3
   fi
+  if [ -n "$GA" ]; then GAN="handshake ${GA}s old: ifup hook run"; else GAN="no handshake: ifup hook run"; fi
+  history_add guard stale "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "$GAN"
   if [ -x "$HOOKFILE" ]; then
     ACTION=ifup INTERFACE="$PIAWG_IF" "$HOOKFILE"
   else
@@ -3847,6 +3922,7 @@ api_cmd() {
   iface-save) shift && api_iface_save "$@" ;;
   iface-remove) api_iface_remove "$2" ;;
   log) if [ -s "$PIALOG" ]; then tail -n "${2:-80}" "$PIALOG"; fi ;;
+  history) api_history ;;
   *) api_fail "Unknown api command '$1'" ;;
   esac
 }

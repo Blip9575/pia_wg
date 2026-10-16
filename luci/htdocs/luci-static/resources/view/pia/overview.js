@@ -33,6 +33,7 @@ function callSave(args) {
 }
 const callRemove = rpc.declare({ object: 'luci.pia', method: 'remove', params: [ 'name' ] });
 const callLog = rpc.declare({ object: 'luci.pia', method: 'log', params: [ 'lines' ] });
+const callHistory = rpc.declare({ object: 'luci.pia', method: 'history' });
 
 const PROTOS = [
 	[ 'amneziawg', _('AmneziaWG'), _('Recommended to prevent WireGuard traffic being throttled or blocked.') ],
@@ -694,6 +695,52 @@ return view.extend({
 		]);
 	},
 
+	// ---- history --------------------------------------------------------------------
+
+	loadHistory: function() {
+		return callHistory().then(r => {
+			if (!this.histBox) return;
+			const rows = (r && r.entries) || [], sum = (r && r.summary) || [];
+			if (!rows.length) {
+				dom.content(this.histBox, E('p', { 'class': 'cbi-value-description' }, _('Nothing has been recorded yet.')));
+				return;
+			}
+			const EVENTS = { register: _('Key registration'), fast: _('Fastest-region ping'), confirm: _('Tunnel confirmation'), guard: _('Guard') };
+			const ms = v => (v == null) ? '–' : '%d ms'.format(v);
+			const cell = (t, v) => E('td', { 'class': 'td', 'data-title': t }, v);
+			const head = cols => E('tr', { 'class': 'tr table-titles' }, cols.map(c => E('th', { 'class': 'th' }, c)));
+			const sumTable = E('table', { 'class': 'table' }, [
+				head([ _('Region'), _('Country'), _('Registrations'), _('Accepted'), _('Refused'), _('Average time') ])
+			].concat(sum.map(x => E('tr', { 'class': 'tr' }, [
+				cell(_('Region'), x.region || x.region_id), cell(_('Country'), x.country || '–'), cell(_('Registrations'), String(x.total)),
+				cell(_('Accepted'), String(x.ok)), cell(_('Refused'), x.refused + ' (' + (x.total ? Math.round(100 * x.refused / x.total) : 0) + '%)'),
+				cell(_('Average time'), ms(x.ms))
+			]))));
+			const detail = E('table', { 'class': 'table' }, [
+				head([ _('Time (UTC)'), _('Interface'), _('Event'), _('Country'), _('Region'), _('Server IP'), _('Latency'), _('Status') ])
+			].concat(rows.map(x => E('tr', { 'class': 'tr' }, [
+				cell(_('Time (UTC)'), utcDate(x.t) + ' ' + utcTime(x.t)), cell(_('Interface'), x.if || '–'),
+				cell(_('Event'), EVENTS[x.ev] || x.ev), cell(_('Country'), x.country || '–'), cell(_('Region'), x.region || x.region_id || '–'),
+				cell(_('Server IP'), x.ip || '–'), cell(_('Latency'), ms(x.ms)),
+				E('td', { 'class': 'td', 'data-title': _('Status'), 'title': x.note || '' }, x.status || '–')
+			]))));
+			dom.content(this.histBox, [ sumTable, E('div', { 'style': 'max-height:22em;overflow:auto;margin-top:1em' }, detail) ]);
+		});
+	},
+
+	renderHistory: function() {
+		this.histBox = E('div', {}, E('p', { 'class': 'spinning' }, _('Loading…')));
+		this.loadHistory();
+		return E('div', { 'class': 'cbi-section' }, [
+			E('h3', _('History')),
+			E('div', { 'class': 'cbi-section-descr' }, _('Servers tried by this router: key registrations, fastest-region pings, tunnel confirmations and guard actions (latest 200).')),
+			this.histBox,
+			E('div', { 'class': 'cbi-page-actions' }, [
+				E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, () => this.loadHistory()) }, _('Refresh history'))
+			])
+		]);
+	},
+
 	// ---- page ---------------------------------------------------------------------------
 
 	render: function(st) {
@@ -706,7 +753,8 @@ return view.extend({
 			E('div', { 'class': 'cbi-map-descr' }, _('Private Internet Access over WireGuard and AmneziaWG (pia.sh %s).').format(st.version)),
 			this.accountBox,
 			this.renderInterfaces(),
-			this.renderLog()
+			this.renderLog(),
+			this.renderHistory()
 		]);
 		poll.add(() => this.refresh(), 5);
 		return page;

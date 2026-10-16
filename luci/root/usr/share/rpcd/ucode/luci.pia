@@ -151,6 +151,12 @@ const methods = {
 		}
 	},
 
+	history: {
+		call: function() {
+			return run([ 'api', 'history' ]);
+		}
+	},
+
 	log: {
 		args: { lines: 0 },
 		call: function(request) {
