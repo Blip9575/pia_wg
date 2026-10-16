@@ -24,7 +24,7 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_block: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1 }
 });
 function callSave(args) {
 	const o = {};
@@ -341,6 +341,10 @@ return view.extend({
 		if (i.keepalive != null && i.keepalive != KEEPALIVE) parts.push(i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive'));
 		parts.push(i.default_route ? _('default route') : _('no default route'));
 		if (i.firewall) parts.push(_('zone %s').format(i.name) + (i.forward.length ? ' ← ' + i.forward.join(', ') : ''));
+		const ksw = i.killswitch;
+		if (ksw && ksw.enabled) parts.push(_('kill switch'));
+		if (ksw && ksw.leaks && ksw.leaks.length)
+			parts.push('⚠ ' + ksw.leaks.map(l => _('%s can reach %s without the VPN').format(l.split('>')[0], l.split('>')[1])).join(', '));
 		const pf = i.portfwd;
 		if (pf && pf.enabled) {
 			if (!pf.capable)
@@ -600,6 +604,13 @@ return view.extend({
 		const zones = st.zones.filter(z => (adding || z != i.name) && !/^Block-/.test(z));
 		const fwd = adding ? (st.lan_zone ? [ st.lan_zone ] : []) : i.forward;
 		const boxes = zones.map(z => [ z, checkbox(fwd.indexOf(z) >= 0) ]);
+		const ks = adding ? {} : (i.killswitch || {});
+		const ksSel = ks.enabled && ks.block.length ? ks.block : (st.wan_zones || []);
+		const ksBoxes = zones.map(z => [ z, checkbox(ksSel.indexOf(z) >= 0) ]);
+		const ksList = E('div', ksBoxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ])));
+		const ksBox = field(_('Block forwarding to'), ksList, _('The zones that lead to the internet without the VPN. Forwarding from the zones above to these is removed, and put back when the kill switch is turned off.'));
+		const ksCb = checkbox(!!ks.enabled, () => { ksBox.style.display = ksCb.checked ? '' : 'none'; });
+		ksBox.style.display = ks.enabled ? '' : 'none';
 
 		const regionBox = E('div');
 		let picker = null;
@@ -637,6 +648,12 @@ return view.extend({
 				if (!/^[0-9]+$/.test(keepInp.value) || k < 1 || k > 65535)
 					return problem(_('Keepalive: digits only, 1 to 65535'));
 			}
+			if (ksCb.checked) {
+				if (!fwCb.checked || !boxes.some(b => b[1].checked))
+					return problem(_('The kill switch needs the firewall zone and a zone to allow forwarding from'));
+				if (!ksBoxes.some(b => b[1].checked))
+					return problem(_('The kill switch needs a zone to block forwarding to'));
+			}
 			if (pfCb.checked) {
 				if (pfIp.value.trim() && !IPV4.test(pfIp.value.trim()))
 					return problem(_('Destination IP address: enter an IPv4 address'));
@@ -658,6 +675,8 @@ return view.extend({
 				route: routeCb.disabled ? null : (routeCb.checked ? 'yes' : 'no'),
 				firewall: fwCb.checked ? 'yes' : 'no',
 				forward: fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
+				killswitch: ksCb.checked ? 'yes' : 'no',
+				ks_block: ksCb.checked ? ksBoxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
 				portfwd: pfCb.checked ? 'yes' : 'no',
 				pf_ip: pfCb.checked ? pfIp.value.trim() : null,
 				pf_port: pfCb.checked ? pfPort.value : null,
@@ -700,6 +719,8 @@ return view.extend({
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('The zones whose traffic may go through this VPN.')),
+				field(_('Kill switch'), ksCb, _('Block devices from reaching the internet except through this VPN. Needs the firewall zone and a zone to allow forwarding from')),
+				ksBox,
 				field(_('Port forwarding'), pfCb, _('Enable Port forwarding')),
 				pfBox,
 				field(_('Bring up on boot'), bootCb, _('Enable to connect on boot')),

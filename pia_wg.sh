@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.11.0
+# Version: 1.12.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1464,6 +1464,92 @@ fw_lan_zone() {
   done
 }
 
+# The zones that lead to the internet without a VPN: masquerading, and none of the
+# networks of the zone is a VPN interface
+fw_wan_zones() {
+  FWWN=0
+  while uci -q get "firewall.@zone[$FWWN]" >/dev/null; do
+    if [ "$(uci -q get "firewall.@zone[$FWWN].masq")" = '1' ] && [ "$(uci -q get "firewall.@zone[$FWWN].pia_managed")" != '1' ]; then
+      FWVPN=''
+      for FWNET in $(uci -q get "firewall.@zone[$FWWN].network"); do
+        case "$(uci -q get "network.$FWNET.proto")" in
+        wireguard | amneziawg | openvpn | vpn) FWVPN=1 ;;
+        esac
+      done
+      [ -n "$FWVPN" ] || echo "$(uci -q get "firewall.@zone[$FWWN].name")"
+    fi
+    FWWN=$((FWWN + 1))
+  done
+}
+
+# The forwardings from the zones that forward into the interface to the zones that
+# lead to the internet: "src>dest" each (the way out if the VPN is down)
+ks_leaks() {
+  KLW=" $(fw_wan_zones | tr '\n' ' ')"
+  KLS=" $(uci -q get "pia.$PIAWG_IF.fw_forward") "
+  [ "$(uci -q get "pia.$PIAWG_IF.fw_zone")" = '1' ] || return 0
+  KLN=0
+  while uci -q get "firewall.@forwarding[$KLN]" >/dev/null; do
+    KLSRC="$(uci -q get "firewall.@forwarding[$KLN].src")"
+    KLDST="$(uci -q get "firewall.@forwarding[$KLN].dest")"
+    case "$KLS" in *" $KLSRC "*) case "$KLW" in *" $KLDST "*) echo "$KLSRC>$KLDST" ;; esac ;; esac
+    KLN=$((KLN + 1))
+  done
+}
+
+# Kill switch: the forwardings from the zones that forward into the interface to the
+# blocked zones are removed (remembered in ks_removed, put back when the switch is
+# turned off or the zones change). $1 off: as if turned off.
+ks_sync_inner() {
+  FWCHANGED=''
+  KSWANT=' '
+  if [ "$1" != 'off' ] && [ "$(uci -q get "pia.$PIAWG_IF.ks_enable")" = '1' ] && [ "$(uci -q get "pia.$PIAWG_IF.fw_zone")" = '1' ]; then
+    for KSS in $(uci -q get "pia.$PIAWG_IF.fw_forward"); do
+      for KSD in $(uci -q get "pia.$PIAWG_IF.ks_block"); do
+        [ "$KSS" = "$KSD" ] || KSWANT="$KSWANT$KSS>$KSD "
+      done
+    done
+  fi
+  KSREM=" $(uci -q get "pia.$PIAWG_IF.ks_removed") "
+  KSN=0
+  while uci -q get "firewall.@forwarding[$KSN]" >/dev/null; do KSN=$((KSN + 1)); done
+  KSI=$((KSN - 1))
+  while [ "$KSI" -ge 0 ]; do
+    KSK="$(uci -q get "firewall.@forwarding[$KSI].src")>$(uci -q get "firewall.@forwarding[$KSI].dest")"
+    case "$KSWANT" in
+    *" $KSK "*)
+      uci -q delete "firewall.@forwarding[$KSI]"
+      FWCHANGED=1
+      case "$KSREM" in
+      *" $KSK "*) ;;
+      *)
+        uci -q add_list "pia.$PIAWG_IF.ks_removed=$KSK"
+        KSREM="$KSREM$KSK "
+        ;;
+      esac
+      ;;
+    esac
+    KSI=$((KSI - 1))
+  done
+  # put back what is not removed any more
+  for KSK in $KSREM; do
+    case "$KSWANT" in *" $KSK "*) continue ;; esac
+    KSF="$(uci -q add firewall forwarding)"
+    uci -q set "firewall.$KSF.src=${KSK%%>*}"
+    uci -q set "firewall.$KSF.dest=${KSK#*>}"
+    uci -q del_list "pia.$PIAWG_IF.ks_removed=$KSK"
+    FWCHANGED=1
+  done
+  [ -z "$FWCHANGED" ] || uci -q commit firewall
+  uci -q commit pia
+  return 0
+}
+
+ks_sync() {
+  persist_run ks_sync_inner "$1"
+  fw_reload
+}
+
 # Make firewall.* what pia.<if>.fw_zone / fw_forward say (compare, then write).
 # Run through persist_run: sets FWCHANGED.
 fw_apply_inner() {
@@ -1533,6 +1619,8 @@ fw_apply_inner() {
 fw_remove_inner() {
   pf_fw_inner ''
   PFRM="$FWCHANGED"
+  ks_sync_inner off
+  PFRM="$PFRM$FWCHANGED"
   FWCHANGED=''
   FWN=0
   while uci -q get "firewall.@forwarding[$FWN]" >/dev/null; do FWN=$((FWN + 1)); done
@@ -3835,6 +3923,9 @@ api_iface_json() {
     --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
     --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
     --arg boot "$(uci -q get "pia.$PIAWG_IF.iface_auto")" \
+    --arg kse "$(uci -q get "pia.$PIAWG_IF.ks_enable")" \
+    --arg ksb "$(uci -q get "pia.$PIAWG_IF.ks_block")" \
+    --arg ksl "$(ks_leaks | tr '\n' ' ')" \
     --arg pfe "$(uci -q get "pia.$PIAWG_IF.pf_enable")" \
     --arg pfip "$(uci -q get "pia.$PIAWG_IF.pf_ip")" \
     --arg pfdp "$(uci -q get "pia.$PIAWG_IF.pf_port")" \
@@ -3850,6 +3941,7 @@ api_iface_json() {
       mtu: ($mtu | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
       dip: ($dip != ""), boot: ($boot == "1"),
+      killswitch: {enabled: ($kse == "1"), block: ($ksb | split(" ") | map(select(. != ""))), leaks: ($ksl | split(" ") | map(select(. != "")))},
       portfwd: {enabled: ($pfe == "1"), ip: $pfip, dest_port: ($pfdp | tonumber? // null), port: ($pfport | tonumber? // null), capable: ($pfcap != "false")}, up: $up, handshake: ($hs | tonumber? // null),
       endpoint: ($ep | if . == "" then null else . end), job: $job}'
 }
@@ -3884,7 +3976,7 @@ api_status() {
   } | jq -sc --arg version "$CURVERS" --argjson awg "$AAWG" --argjson strict "$ASTRICT" \
     --arg id "$(uci -q get pia.account.id)" --arg pw "$(uci -q get pia.account.password)" \
     --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
-    --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg stdmtu "$(std_mtu)" \
+    --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg wans "$(fw_wan_zones | tr '\n' ' ')" --arg stdmtu "$(std_mtu)" \
     --arg small "$PIA_MTU_SMALL" --arg max "$PIA_MTU_MAX" \
     --arg dns "$PIA_DNS" --arg dnsso "$PIA_DNS_SO" --arg dnsmace "$PIA_DNS_MACE" --arg dnssomace "$PIA_DNS_SO_MACE" \
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
@@ -3892,7 +3984,7 @@ api_status() {
     --argjson job "$(api_job_json _global)" --argjson probe "$(api_job_json _probe)" \
     '{version: $version, awg: ($awg == 1), strict_dns: ($strict == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
-      zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan,
+      zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan, wan_zones: ($wans | split(" ") | map(select(. != ""))),
       std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), max_mtu: ($max | tonumber),
       dns_servers: {standard: $dns, streaming: $dnsso, mace: $dnsmace, streaming_mace: $dnssomace},
       cache: {regions: $regions, updated: ($listts | tonumber? // 0), checked: ($checked | tonumber? // 0),
@@ -4004,13 +4096,14 @@ api_job() {
 #   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace|custom
 #   dns_ip=<IPv4 of a custom DNS server>  mtu=std|small|<1280-1420>
 #   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
+#   killswitch=yes|no  ks_block="<zones>" (the forwardings from the allowed zones to these are removed)
 #   portfwd=yes|no  pf_ip=<IPv4 behind the router>  pf_port=<port there; empty: the forwarded one>
 #   boot=yes|no (netifd starts it at boot)  forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
 api_iface_save() {
   AN="$1"
   shift
   valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
-  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET=''
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET='' A_KS='' A_KSB='' A_KSSET=''
   for AKV in "$@"; do
     AV="${AKV#*=}"
     case "$AKV" in
@@ -4030,6 +4123,11 @@ api_iface_save() {
     strict=*) A_STRICT="$AV" ;;
     boot=*) A_BOOT="$AV" ;;
     portfwd=*) A_PF="$AV" ;;
+    killswitch=*) A_KS="$AV" ;;
+    ks_block=*)
+      A_KSB="$AV"
+      A_KSSET=1
+      ;;
     pf_ip=*)
       A_PFIP="$AV"
       A_PFSET=1
@@ -4053,6 +4151,27 @@ api_iface_save() {
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_BOOT" in '' | yes | no) ;; *) api_fail "Invalid boot choice" ;; esac
   case "$A_PF" in '' | yes | no) ;; *) api_fail "Invalid port forwarding choice" ;; esac
+  case "$A_KS" in '' | yes | no) ;; *) api_fail "Invalid kill switch choice" ;; esac
+  for AZ in $A_KSB; do
+    case "$AZ" in *[!A-Za-z0-9_-]*) api_fail "Invalid zone name" ;; esac
+    [ -n "$(fw_zone_id "$AZ")" ] || api_fail "No firewall zone named '$AZ'"
+  done
+  # turned on (or left on): the firewall zone and a zone to allow forwarding from are needed
+  if [ "$A_KS" = 'yes' ] || { [ -z "$A_KS" ] && [ "$(uci -q get "pia.$AN.ks_enable")" = '1' ]; }; then
+    [ "$A_KS" = 'no' ] || {
+      AKFW="$(uci -q get "pia.$AN.fw_zone")"
+      [ "$A_FW" = 'yes' ] && AKFW=1
+      [ "$A_FW" = 'no' ] && AKFW=0
+      if [ -n "$A_FWDSET" ]; then AKSRC="$A_FWD"; else AKSRC="$(uci -q get "pia.$AN.fw_forward")"; fi
+      [ -n "$AKSRC" ] || [ -n "$A_FWDSET" ] || iface_exists "$AN" || AKSRC="$(fw_lan_zone)"
+      if [ "$A_FW" = 'no' ]; then
+        [ "$A_KS" = 'yes' ] && api_fail "The kill switch needs the firewall zone"
+        A_KS=no
+      elif [ "$AKFW" != '1' ] || [ -z "$AKSRC" ]; then
+        api_fail "The kill switch needs the firewall zone and a zone to allow forwarding from"
+      fi
+    }
+  fi
   [ -z "$A_PFIP" ] || valid_ipv4 "$A_PFIP" || api_fail "Destination IP address: an IPv4 address"
   case "$A_PFPORT" in
   '') ;;
@@ -4213,6 +4332,21 @@ api_iface_save() {
     uci -q commit pia
     NETCHANGED='' SESSCHANGED=''
     ensure_iface
+  fi
+  # kill switch
+  case "$A_KS" in
+  yes) uci -q set "pia.$AN.ks_enable=1" ;;
+  no) uci -q delete "pia.$AN.ks_enable" ;;
+  esac
+  if [ "$(uci -q get "pia.$AN.ks_enable")" = '1' ]; then
+    if [ -n "$A_KSSET" ] || [ -z "$(uci -q get "pia.$AN.ks_block")" ]; then
+      uci -q delete "pia.$AN.ks_block"
+      for AZ in ${A_KSB:-$(fw_wan_zones)}; do uci -q add_list "pia.$AN.ks_block=$AZ"; done
+    fi
+  fi
+  uci -q commit pia
+  if [ -n "$A_KS" ] || [ -n "$A_KSSET" ] || [ -n "$A_FWDSET" ] || [ "$A_FW" = 'no' ] || [ "$(uci -q get "pia.$AN.ks_enable")" = '1' ] || [ -n "$(uci -q get "pia.$AN.ks_removed")" ]; then
+    ks_sync >&3
   fi
   # port forwarding: the option, the destination, and the redirect at once if the tunnel is up
   if [ -n "$A_PF" ] || [ -n "$A_PFSET" ]; then
@@ -4618,6 +4752,12 @@ case "$1" in
     echo "Session key: RAM only, registered $(($(date +%s) - $(session_get time)))s ago on $(session_get server_ip)"
   else
     echo "Session key: none (made at the next start, renew or ifup)"
+  fi
+  KSL="$(ks_leaks | tr '\n' ' ')"
+  if [ -n "$KSL" ]; then
+    echo "Kill switch: $([ "$(uci -q get "pia.$PIAWG_IF.ks_enable")" = '1' ] && echo 'ON, but' || echo OFF): traffic can leave without the VPN through ${KSL}(source>destination)"
+  elif [ "$(uci -q get "pia.$PIAWG_IF.ks_enable")" = '1' ]; then
+    echo "Kill switch: ON (no forwarding to $(uci -q get "pia.$PIAWG_IF.ks_block"))"
   fi
   if pf_enabled; then
     PFSP="$(awk '{print $1; exit}' "$(pf_statefile)" 2>/dev/null)"
