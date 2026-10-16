@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.9.2
+# Version: 1.9.3
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2921,13 +2921,25 @@ confirm_tunnel() {
 # confirm [--force]: nothing when the interface is down or already confirmed;
 # after a failure not again within 2 minutes (unless --force)
 confirm_cmd() {
-  wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1 || return 0
-  confirm_done && return 0
+  wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1 || {
+    echo "Confirm: nothing to do, the interface is not up" >&3
+    return 0
+  }
+  confirm_done && {
+    echo "Confirm: nothing to do, the tunnel is already confirmed (handshake, DNS server and routes in place)" >&3
+    return 0
+  }
   if [ "$1" != '--force' ]; then
     CCF="$(cat "$RUNDIR/confirm.fail.$PIAWG_IF" 2>/dev/null)"
-    [ $(($(date +%s) - ${CCF:-0})) -lt 120 ] && return 0
+    if [ $(($(date +%s) - ${CCF:-0})) -lt 120 ]; then
+      echo "Confirm: nothing to do yet, the last attempt did not succeed, $(($(date +%s) - CCF))s ago (next try after 120s)" >&3
+      return 0
+    fi
   fi
-  session_valid || return 0
+  session_valid || {
+    echo "Confirm: nothing to do, no session key yet (made at the next start or renew)" >&3
+    return 0
+  }
   confirm_tunnel
 }
 
