@@ -724,7 +724,15 @@ return view.extend({
 				cell(_('Server IP'), x.ip || '–'), cell(_('Latency'), ms(x.ms)),
 				E('td', { 'class': 'td', 'data-title': _('Status'), 'title': x.note || '' }, x.status || '–')
 			]))));
-			dom.content(this.histBox, [ sumTable, E('div', { 'style': 'max-height:22em;overflow:auto;margin-top:1em' }, detail) ]);
+			const total = sum.reduce((n, x) => n + x.total, 0), refused = sum.reduce((n, x) => n + x.refused, 0);
+			dom.content(this.histBox, [
+				E('h4', _('Region summary')),
+				E('div', { 'class': 'cbi-section-descr' }, _('Key registrations per region. Total: %d · Regions: %d · Refused: %d. A region that refuses often takes longer to connect.').format(total, sum.length, refused)),
+				sumTable,
+				E('h4', { 'style': 'margin-top:1.5em' }, _('Event history')),
+				E('div', { 'class': 'cbi-section-descr' }, _('Newest first: registrations, fastest-region pings, tunnel confirmations and guard actions. Events shown: %d.').format(rows.length)),
+				E('div', { 'style': 'max-height:22em;overflow:auto' }, detail)
+			]);
 		});
 	},
 
@@ -733,7 +741,7 @@ return view.extend({
 		this.loadHistory();
 		return E('div', { 'class': 'cbi-section' }, [
 			E('h3', _('History')),
-			E('div', { 'class': 'cbi-section-descr' }, _('Servers tried by this router: key registrations, fastest-region pings, tunnel confirmations and guard actions (latest 200).')),
+			E('div', { 'class': 'cbi-section-descr' }, _('What this router did with the PIA servers, kept in history.json in the Cache Path (latest 200 events).')),
 			this.histBox,
 			E('div', { 'class': 'cbi-page-actions' }, [
 				E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, () => this.loadHistory()) }, _('Refresh history'))
