@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.12.2
+# Version: 1.12.3
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -4019,7 +4019,7 @@ api_status() {
   } | jq -sc --arg version "$CURVERS" --argjson awg "$AAWG" --argjson strict "$ASTRICT" \
     --arg id "$(uci -q get pia.account.id)" --arg pw "$(uci -q get pia.account.password)" \
     --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
-    --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg wans "$(fw_wan_zones | tr '\n' ' ')" --arg vpns "$(fw_vpn_zones | tr '\n' ' ')" --arg masqs "$(fw_masq_zones | tr '\n' ' ')" --arg stdmtu "$(std_mtu)" \
+    --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg wans "$(fw_wan_zones | tr '\n' ' ')" --arg vpns "$(fw_vpn_zones | tr '\n' ' ')" --arg brwans "$(fw_zone_of_dev br-wan | tr '\n' ' ')" --arg masqs "$(fw_masq_zones | tr '\n' ' ')" --arg stdmtu "$(std_mtu)" \
     --arg small "$PIA_MTU_SMALL" --arg max "$PIA_MTU_MAX" \
     --arg dns "$PIA_DNS" --arg dnsso "$PIA_DNS_SO" --arg dnsmace "$PIA_DNS_MACE" --arg dnssomace "$PIA_DNS_SO_MACE" \
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
@@ -4027,7 +4027,7 @@ api_status() {
     --argjson job "$(api_job_json _global)" --argjson probe "$(api_job_json _probe)" \
     '{version: $version, awg: ($awg == 1), strict_dns: ($strict == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
-      zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan, wan_zones: ($wans | split(" ") | map(select(. != ""))), vpn_zones: ($vpns | split(" ") | map(select(. != ""))), masq_zones: ($masqs | split(" ") | map(select(. != ""))),
+      zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan, wan_zones: ($wans | split(" ") | map(select(. != ""))), vpn_zones: ($vpns | split(" ") | map(select(. != ""))), brwan_zones: ($brwans | split(" ") | map(select(. != ""))), masq_zones: ($masqs | split(" ") | map(select(. != ""))),
       std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), max_mtu: ($max | tonumber),
       dns_servers: {standard: $dns, streaming: $dnsso, mace: $dnsmace, streaming_mace: $dnssomace},
       cache: {regions: $regions, updated: ($listts | tonumber? // 0), checked: ($checked | tonumber? // 0),

@@ -603,14 +603,14 @@ return view.extend({
 		pfBox.style.display = pf.enabled ? '' : 'none';
 		const zones = st.zones.filter(z => (adding || z != i.name) && !/^Block-/.test(z));
 		const fwd = adding ? (st.lan_zone ? [ st.lan_zone ] : []) : i.forward;
-		// (not the WAN zones, the VPN zones and the zones that masquerade, unless it is already forwarding)
-		const hidden = [].concat(st.wan_zones || [], st.vpn_zones || [], st.masq_zones || []);
+		// (not the zones attached to br-wan, the VPN zones and the zones that masquerade, unless it is already forwarding)
+		const hidden = [].concat(st.brwan_zones || [], st.wan_zones || [], st.vpn_zones || [], st.masq_zones || []);
 		const boxes = zones.filter(z => fwd.indexOf(z) >= 0 || hidden.indexOf(z) < 0).map(z => [ z, checkbox(fwd.indexOf(z) >= 0) ]);
 		const ks = adding ? {} : (i.killswitch || {});
 		const ksSel = ks.enabled && ks.wan.length ? ks.wan : (st.wan_zones || []);
 		const ksBoxes = (st.wan_zones || []).filter(z => z != (adding ? '' : i.name)).map(z => [ z, checkbox(ksSel.indexOf(z) >= 0) ]);
 		const ksList = E('div', ksBoxes.length ? ksBoxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ])) : _('No WAN zone found (attached to br-wan, masquerading)'));
-		const ksBox = field(_('WAN zones'), ksList, _('Select WAN zones to be isolated from when VPN is down'));
+		const ksBox = field(_('WAN zones'), ksList, _('Select WAN zone to be removed'));
 		const ksCb = checkbox(!!ks.enabled, () => { ksBox.style.display = ksCb.checked ? '' : 'none'; });
 		ksBox.style.display = ks.enabled ? '' : 'none';
 
