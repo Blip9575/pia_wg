@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.9.1 (upstream 1.0.16)
+1.9.2 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -214,6 +214,8 @@ When it runs unattended, the script's log is located in `/var/log/pia/pia.log` (
 The log can be displayed using `pia_wg.sh log show` and cleared using `pia_wg_sh log clear`
 
 What unattended runs print (cron, the ifup hook, LuCI jobs) also goes to the system log (`logread | grep pia`), like other daemons do: tag `pia[PID]`, facility `daemon`, lines starting `PIA: ` and, for an interface, `PIA: [name] `; failures are warnings.
+
+The first run after each boot adds one line, `Boot: up Ns, clock … , version …; NAME: session key yes|no, bring up on boot yes|no` (RAM only, once per boot). The router has no battery clock, so lines logged before the clock is synchronised carry the last saved time and the next lines jump forward; the `up Ns` tells how long the boot had run. A VPN token refusal names the answer: `PIA refused the VPN token (HTTP 401 from SERVER: message); trying again in 5s`.
 
 `luci install` and the first interface made from LuCI install the cache refresh and renew cron entries when they are missing (and the guard; a retired watchdog's entries are removed).
 

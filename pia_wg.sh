@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.9.1
+# Version: 1.9.2
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1007,6 +1007,7 @@ $(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
   SIBIPS="$(sibling_endpoints) $PIAEXCL"
   SERVERS="$(echo "$SERVERS" | awk -v u="$SIBIPS" 'BEGIN{n=split(u,a," ");for(i=1;i<=n;i++)x[a[i]]=1} !($1 in x)')"
   unset ADDKEYAUTHFAIL
+  ADDKEYWHY='no server to ask'
   while read -r HOST CN MODE KPORT; do
     case "$MODE" in
     'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$HOST:$KPORT" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:$KPORT/$KEYPATH")" ;;
@@ -1015,6 +1016,10 @@ $(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
     esac
     [ "$CODE" = '401' ] && ADDKEYAUTHFAIL=1
     PIAADDKEY="$(cat "$PIARESP")"
+    # why the last server said no (shown by the retry lines)
+    ADDKEYWHY="HTTP ${CODE:-000} from $CN"
+    AKMSG="$(echo "$PIAADDKEY" | jq -r '.message // .status // empty' 2>/dev/null | tr -cd ' -~' | cut -c1-80)"
+    [ -z "$AKMSG" ] || ADDKEYWHY="$ADDKEYWHY: $AKMSG"
     [ "$(echo "$PIAADDKEY" | jq -r '.status' 2>/dev/null)" = 'OK' ] && return 0
   done <<EOS
 $SERVERS
@@ -1049,18 +1054,18 @@ pia_addkey_any() {
     # A refusal is often a burst that hits the whole region and passes: wait
     # before blaming the token (renewing it does not help then)
     for AKW in 5 15 30; do
-      echo "PIA refused the VPN token; trying again in ${AKW}s" >&3
+      echo "PIA refused the VPN token ($ADDKEYWHY); trying again in ${AKW}s" >&3
       sleep "$AKW"
       pia_addkey && return 0
       [ "$ADDKEYAUTHFAIL" ] || return 1
     done
     VTS="$(uci -q get pia.vpntoken.timestamp)"
     if [ $(($(date +%s) - ${VTS:-0})) -gt 600 ]; then
-      echo "PIA server refused the VPN token; renewing it" >&3
+      echo "PIA server refused the VPN token ($ADDKEYWHY); renewing it" >&3
       pia_token_forget
       pia_tokens && pia_addkey && return 0
     fi
-    echo "PIA servers refused the VPN token; trying the legacy token" >&3
+    echo "PIA servers refused the VPN token ($ADDKEYWHY); trying the legacy token" >&3
     PIAAUTH='legacy'
     legacy_token_ensure
   fi
@@ -2649,6 +2654,29 @@ wan_present() {
 # used if system.ntp.enabled is not 0 and it runs; otherwise chrony, judged
 # like dqm does: stratum 1-9 (0 and 16 are unsynchronised, 10 is chrony's own
 # local orphan reference) and a system time offset under 200 ms.
+# One line at the first logged run after a boot: uptime, whether the clock is
+# right yet (timestamps before that are not), and the state of each interface
+boot_summary() {
+  mkdir "$RUNDIR/boot.logged" 2>/dev/null || return 0
+  time_synced
+  case $? in
+  0) BSCLK="clock synchronised ($TSRC)" ;;
+  *) BSCLK="clock not yet synchronised${TSRC:+ ($TSRC)}, timestamps before the next sync are unreliable" ;;
+  esac
+  BSLINE="Boot: up $(cut -d. -f1 /proc/uptime)s, $BSCLK, version $CURVERS"
+  BSSAVE="$PIAWG_IF"
+  for BSX in $(iface_list); do
+    PIAWG_IF="$BSX"
+    set_ifvars
+    if session_valid; then BSK='yes'; else BSK='no'; fi
+    BSB='no'
+    [ "$(uci -q get "pia.$BSX.iface_auto")" = '1' ] && BSB='yes'
+    BSLINE="$BSLINE; $BSX: session key $BSK, bring up on boot $BSB"
+  done
+  PIAWG_IF="$BSSAVE"
+  set_ifvars
+  echo "$BSLINE" >&3
+}
 time_synced() {
   if [ "$(uci -q get system.ntp.enabled)" != '0' ] && pidof ntpd >/dev/null 2>&1; then
     TSRC='ntpd'
@@ -3875,6 +3903,13 @@ elif [ "$AUTO" ]; then
   exec 4<&-
 else
   exec 3>&2
+fi
+
+if [ "$AUTO" ]; then
+  case "$1 $2" in
+  'renew install' | 'renew remove') ;;
+  'start '* | 'restart '* | 'init-network '* | 'confirm '* | 'renew '* | 'cache refresh' | 'cache probe') boot_summary ;;
+  esac
 fi
 
 # Several interfaces and none named (or -i all): run the command for each
