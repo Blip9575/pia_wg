@@ -24,7 +24,7 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, boot: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1 }
 });
 function callSave(args) {
 	const o = {};
@@ -341,6 +341,15 @@ return view.extend({
 		if (i.keepalive != null && i.keepalive != KEEPALIVE) parts.push(i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive'));
 		parts.push(i.default_route ? _('default route') : _('no default route'));
 		if (i.firewall) parts.push(_('zone %s').format(i.name) + (i.forward.length ? ' ← ' + i.forward.join(', ') : ''));
+		const pf = i.portfwd;
+		if (pf && pf.enabled) {
+			if (!pf.capable)
+				parts.push(_('no port forwarding in this region'));
+			else if (!pf.port)
+				parts.push(_('port forwarding: waiting for a port'));
+			else
+				parts.push(_('port forwarding: %d').format(pf.port) + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : ''));
+		}
 		if (i.dip) parts.push(_('dedicated IP'));
 		return E('small', parts.join(' · '));
 	},
@@ -577,6 +586,17 @@ return view.extend({
 		}
 		const fwCb = checkbox(adding ? true : i.firewall);
 		const bootCb = checkbox(adding ? false : i.boot);
+		const pf = adding ? {} : (i.portfwd || {});
+		const pfIp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'maxlength': 15, 'size': 16, 'spellcheck': 'false',
+			'placeholder': _('IPv4 address'), 'value': pf.ip || '' });
+		const pfPort = numInput(pf.dest_port, _('same as the forwarded port'));
+		pfPort.style.marginTop = '0';
+		const pfBox = E('div', [
+			field(_('Destination IP address'), pfIp, _('The device on your network that receives the connections.')),
+			field(_('Destination Port'), pfPort, _('1 to 65535; empty uses the port PIA forwards.'))
+		]);
+		const pfCb = checkbox(!!pf.enabled, () => { pfBox.style.display = pfCb.checked ? '' : 'none'; });
+		pfBox.style.display = pf.enabled ? '' : 'none';
 		const zones = st.zones.filter(z => (adding || z != i.name) && !/^Block-/.test(z));
 		const fwd = adding ? (st.lan_zone ? [ st.lan_zone ] : []) : i.forward;
 		const boxes = zones.map(z => [ z, checkbox(fwd.indexOf(z) >= 0) ]);
@@ -617,6 +637,14 @@ return view.extend({
 				if (!/^[0-9]+$/.test(keepInp.value) || k < 1 || k > 65535)
 					return problem(_('Keepalive: digits only, 1 to 65535'));
 			}
+			if (pfCb.checked) {
+				if (pfIp.value.trim() && !IPV4.test(pfIp.value.trim()))
+					return problem(_('Destination IP address: enter an IPv4 address'));
+				if (pfPort.value && (+pfPort.value < 1 || +pfPort.value > 65535))
+					return problem(_('Destination Port: 1 to 65535'));
+				if (pfIp.value.trim() && !fwCb.checked)
+					return problem(_('Port forwarding to a device needs the firewall zone'));
+			}
 			if (dnsCtl.node.value == 'custom' && !IPV4.test(dnsInp.value.trim()))
 				return problem(_('DNS server: enter an IPv4 address'));
 			const title = adding ? _('Add interface') : _('Saving %s').format(name);
@@ -630,6 +658,9 @@ return view.extend({
 				route: routeCb.disabled ? null : (routeCb.checked ? 'yes' : 'no'),
 				firewall: fwCb.checked ? 'yes' : 'no',
 				forward: fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
+				portfwd: pfCb.checked ? 'yes' : 'no',
+				pf_ip: pfCb.checked ? pfIp.value.trim() : null,
+				pf_port: pfCb.checked ? pfPort.value : null,
 				boot: bootCb.checked ? 'yes' : 'no'
 			}).then(r => {
 				ui.hideModal();
@@ -669,6 +700,8 @@ return view.extend({
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('The zones whose traffic may go through this VPN.')),
+				field(_('Port forwarding'), pfCb, _('Enable Port forwarding')),
+				pfBox,
 				field(_('Bring up on boot'), bootCb, _('Enable to connect on boot')),
 				err,
 				E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ' ].concat(buttons))

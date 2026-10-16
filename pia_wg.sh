@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.10.4
+# Version: 1.11.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1531,6 +1531,8 @@ fw_apply_inner() {
 
 # Remove the zone and the forwardings we made for the interface being handled
 fw_remove_inner() {
+  pf_fw_inner ''
+  PFRM="$FWCHANGED"
   FWCHANGED=''
   FWN=0
   while uci -q get "firewall.@forwarding[$FWN]" >/dev/null; do FWN=$((FWN + 1)); done
@@ -1548,6 +1550,7 @@ fw_remove_inner() {
     uci -q delete "firewall.$FWID"
     FWCHANGED=1
   fi
+  [ -z "$PFRM" ] || FWCHANGED=1
   [ -z "$FWCHANGED" ] || uci -q commit firewall
   return 0
 }
@@ -2096,6 +2099,8 @@ session_save() {
       echo "scope=$(session_scope)"
       echo "priv=$1"
       echo "peer_ip=$WGPEERIP"
+      echo "vip=$WGVIP"
+      echo "cn=$WGCN"
       echo "server_ip=$WGSERVIP"
       echo "server_port=$WGSERVPT"
       echo "server_key=$WGSERVKEY"
@@ -2536,6 +2541,9 @@ set_netconf() {
   WGDNS1="$(echo "$PIAADDKEY" | jq -r '.dns_servers[0]')"
   WGDNS2="$(echo "$PIAADDKEY" | jq -r '.dns_servers[1]')"
   WGPEERIP="$(echo "$PIAADDKEY" | jq -r '.peer_ip')"
+  # the server's address inside the tunnel and its name: port forwarding talks to them
+  WGVIP="$(echo "$PIAADDKEY" | jq -r '.server_vip // empty')"
+  if [ -z "$DIP_STATUS" ]; then WGCN="$CN"; else WGCN="$(uci -q get "pia.$PIAWG_IF.dip_cn")"; fi
   # AmneziaWG: the obfuscation parameters of the server (or the official app's)
   WGOBF=''
   if [ "$PIAPROTO" = 'amneziawg' ]; then
@@ -2753,6 +2761,7 @@ stop_wgpia() {
   ifdown "$PIAWG_IF" >/dev/null 2>&1
   # the host route pinned by endpoint_route
   SEP="$(sget "network.$PIAWG_PEER.endpoint_host")" && [ -n "$SEP" ] && ip route del "$SEP/32" 2>/dev/null
+  pf_stop
   return 0
 }
 
@@ -3048,6 +3057,212 @@ confirm_recover() {
   return $CRRC
 }
 
+# ---- port forwarding, as the official apps do it ----
+# getSignature (with the API token) on the server's address inside the tunnel
+# (port 19999, the PIA CA, the server's name) returns a payload (the port and its
+# expiry) and a signature; bindPort with them opens the port and has to be repeated
+# every 15 minutes. A new signature means a new port, so the token is kept (in the
+# cache path, not in the flash) and reused while a week of it is left.
+PF_BIND_EVERY=900
+PF_MIN_LEFT=604800
+
+pf_enabled() { [ "$(uci -q get "pia.$PIAWG_IF.pf_enable")" = '1' ]; }
+pf_tokfile() { echo "$(cache_dir)/portfwd.$PIAWG_IF.json"; }
+pf_statefile() { echo "$RUNDIR/portfwd.$PIAWG_IF"; }
+
+# $1: getSignature|bindPort, then the curl data arguments
+pf_call() {
+  PFPATH="$1"
+  shift
+  curl -s --max-time 10 --cacert "$(pia_ca)" --connect-to "$PFCN::$PFVIP:19999" -G "$@" "https://$PFCN:19999/$PFPATH"
+}
+
+# The saved token if it is for this server and has a week left (sets PFPAY, PFSIG, PFPORT)
+pf_token_load() {
+  PFTF="$(pf_tokfile)"
+  [ -s "$PFTF" ] || return 1
+  [ "$(jq -r '.server // empty' "$PFTF" 2>/dev/null)" = "$PFSRV" ] || return 1
+  PFPAY="$(jq -r '.payload // empty' "$PFTF" 2>/dev/null)"
+  PFSIG="$(jq -r '.signature // empty' "$PFTF" 2>/dev/null)"
+  [ -n "$PFPAY" ] && [ -n "$PFSIG" ] || return 1
+  PFEXP="$(iso2epoch "$(echo "$PFPAY" | jq -Rr '@base64d | fromjson | .expires_at // empty' 2>/dev/null)")"
+  [ "${PFEXP:-0}" -gt $(($(date +%s) + PF_MIN_LEFT)) ] || return 1
+  PFPORT="$(echo "$PFPAY" | jq -Rr '@base64d | fromjson | .port // empty' 2>/dev/null)"
+  [ -n "$PFPORT" ]
+}
+
+# A new token from the server; saved
+pf_token_new() {
+  token_ok apitoken || pia_tokens >/dev/null 2>&1
+  PFAT="$(uci -q get pia.apitoken.token)"
+  [ -n "$PFAT" ] || { PFWHY='there is no API token'; return 1; }
+  PFR="$(pf_call getSignature --data-urlencode "token=$PFAT")"
+  if [ "$(echo "$PFR" | jq -r '.status // empty' 2>/dev/null)" != 'OK' ]; then
+    PFWHY="getSignature: $(echo "$PFR" | jq -r '.message // .status // empty' 2>/dev/null | tr -cd ' -~' | cut -c1-60)"
+    return 1
+  fi
+  PFPAY="$(echo "$PFR" | jq -r '.payload // empty')"
+  PFSIG="$(echo "$PFR" | jq -r '.signature // empty')"
+  PFPORT="$(echo "$PFPAY" | jq -Rr '@base64d | fromjson | .port // empty' 2>/dev/null)"
+  PFEXP="$(iso2epoch "$(echo "$PFPAY" | jq -Rr '@base64d | fromjson | .expires_at // empty' 2>/dev/null)")"
+  [ -n "$PFPAY" ] && [ -n "$PFSIG" ] && [ -n "$PFPORT" ] || { PFWHY='getSignature: incomplete answer'; return 1; }
+  PFTF="$(pf_tokfile)"
+  (
+    umask 077
+    jq -nc --arg s "$PFSRV" --arg p "$PFPAY" --arg g "$PFSIG" '{server: $s, payload: $p, signature: $g}' >"$PFTF.tmp" && mv "$PFTF.tmp" "$PFTF"
+  )
+  PFNEWTOK=1
+  return 0
+}
+
+# The zone of the destination: the one (of those forwarding into the interface) whose
+# network holds the address, else the first of them
+pf_dest_zone() {
+  PDDEV="$(ip -4 route get "$1" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)"
+  PDFIRST=''
+  for PDZ in $(uci -q get "pia.$PIAWG_IF.fw_forward"); do
+    [ -n "$PDFIRST" ] || PDFIRST="$PDZ"
+    PDID="$(fw_zone_id "$PDZ")"
+    for PDN in $(uci -q get "firewall.$PDID.network"); do
+      if [ "$(ubus call "network.interface.$PDN" status 2>/dev/null | jsonfilter -e '@.l3_device')" = "$PDDEV" ]; then
+        echo "$PDZ"
+        return 0
+      fi
+    done
+  done
+  [ -n "$PDFIRST" ] || PDFIRST="$(fw_lan_zone | awk '{print $1}')"
+  echo "$PDFIRST"
+}
+
+# Make the redirect (NAT and its inbound accept) say what is wanted: $1 is the
+# forwarded port, empty for none
+pf_fw_inner() {
+  FWCHANGED=''
+  PFWP="$1"
+  PFWIP="$(uci -q get "pia.$PIAWG_IF.pf_ip")"
+  PFWDP="$(uci -q get "pia.$PIAWG_IF.pf_port")"
+  [ -n "$PFWDP" ] || PFWDP="$PFWP"
+  PFWZ=''
+  if pf_enabled && [ -n "$PFWP" ] && [ -n "$PFWIP" ] && [ -n "$(fw_zone_id "$PIAWG_IF")" ]; then
+    PFWZ="$(pf_dest_zone "$PFWIP")"
+  fi
+  PFHAVE=''
+  PFN=0
+  while uci -q get "firewall.@redirect[$PFN]" >/dev/null; do PFN=$((PFN + 1)); done
+  PFI=$((PFN - 1))
+  while [ "$PFI" -ge 0 ]; do
+    if [ "$(uci -q get "firewall.@redirect[$PFI].pia_managed_pf")" = "$PIAWG_IF" ]; then
+      if [ -n "$PFWZ" ] && [ -z "$PFHAVE" ] &&
+        [ "$(uci -q get "firewall.@redirect[$PFI].src_dport")" = "$PFWP" ] &&
+        [ "$(uci -q get "firewall.@redirect[$PFI].dest_ip")" = "$PFWIP" ] &&
+        [ "$(uci -q get "firewall.@redirect[$PFI].dest_port")" = "$PFWDP" ] &&
+        [ "$(uci -q get "firewall.@redirect[$PFI].dest")" = "$PFWZ" ]; then
+        PFHAVE=1
+      else
+        uci -q delete "firewall.@redirect[$PFI]"
+        FWCHANGED=1
+      fi
+    fi
+    PFI=$((PFI - 1))
+  done
+  if [ -n "$PFWZ" ] && [ -z "$PFHAVE" ]; then
+    PFR="$(uci -q add firewall redirect)"
+    uci -q set "firewall.$PFR.name=PIA port forward $PIAWG_IF"
+    uci -q set "firewall.$PFR.src=$PIAWG_IF"
+    uci -q set "firewall.$PFR.src_dport=$PFWP"
+    uci -q set "firewall.$PFR.dest=$PFWZ"
+    uci -q set "firewall.$PFR.dest_ip=$PFWIP"
+    uci -q set "firewall.$PFR.dest_port=$PFWDP"
+    uci -q add_list "firewall.$PFR.proto=tcp"
+    uci -q add_list "firewall.$PFR.proto=udp"
+    uci -q set "firewall.$PFR.target=DNAT"
+    uci -q set "firewall.$PFR.family=ipv4"
+    uci -q set "firewall.$PFR.pia_managed_pf=$PIAWG_IF"
+    FWCHANGED=1
+  fi
+  [ -z "$FWCHANGED" ] || uci -q commit firewall
+  return 0
+}
+
+pf_fw_sync() {
+  persist_run pf_fw_inner "$1"
+  fw_reload
+}
+
+# Get (or reuse) the token, bind the port, keep the redirect right. keepalive: only
+# when the last bind is 15 minutes old (the guard runs this every minute)
+pf_run() {
+  pf_enabled || return 0
+  PFSF="$(pf_statefile)"
+  if [ "$1" = 'keepalive' ]; then
+    pf_due || return 0
+    tunnel_handshake || return 0
+  fi
+  if [ -n "$(uci -q get "pia.$PIAWG_IF.dip_ip")" ]; then
+    [ "$1" = 'keepalive' ] || echo "Port forwarding: not available with a dedicated IP" >&3
+    return 0
+  fi
+  PFVIP="$(session_get vip)"
+  PFCN="$(session_get cn)"
+  PFSRV="$(session_get server_ip)"
+  if [ -z "$PFVIP" ] || [ -z "$PFCN" ]; then
+    [ "$1" = 'keepalive' ] || echo "Port forwarding: the session has no server address yet (made at the next key registration)" >&3
+    return 0
+  fi
+  ip route replace "$PFVIP/32" dev "$PIAWG_IF" 2>/dev/null
+  PFNEWTOK=''
+  PFWHY=''
+  PFTRY=0
+  PFOK=''
+  while [ $PFTRY -lt 2 ]; do
+    if ! pf_token_load; then
+      pf_token_new || break
+    fi
+    PFB="$(pf_call bindPort --data-urlencode "payload=$PFPAY" --data-urlencode "signature=$PFSIG")"
+    if [ "$(echo "$PFB" | jq -r '.status // empty' 2>/dev/null)" = 'OK' ]; then
+      PFOK=1
+      break
+    fi
+    PFWHY="bindPort: $(echo "$PFB" | jq -r '.message // .status // empty' 2>/dev/null | tr -cd ' -~' | cut -c1-60)"
+    rm -f "$(pf_tokfile)"
+    PFTRY=$((PFTRY + 1))
+  done
+  if [ -z "$PFOK" ]; then
+    rm -f "$PFSF"
+    date +%s >"$RUNDIR/portfwd.try.$PIAWG_IF"
+    echo "Error: Port forwarding FAILED (${PFWHY:-no answer from $PFCN}); tried again in 5 minutes" >&3
+    return 1
+  fi
+  PFOLD="$(awk '{print $1; exit}' "$PFSF" 2>/dev/null)"
+  echo "$PFPORT $(date +%s)" >"$PFSF"
+  rm -f "$RUNDIR/portfwd.try.$PIAWG_IF"
+  if [ "$PFOLD" != "$PFPORT" ] || [ -n "$PFNEWTOK" ]; then
+    echo "Port forwarding: port $PFPORT bound on $PFCN${PFNEWTOK:+ (new token)}, token valid until $(date -d "@$PFEXP" '+%Y/%m/%d' 2>/dev/null || echo "$PFEXP")" >&3
+  fi
+  pf_fw_sync "$PFPORT" >&3
+  return 0
+}
+
+# Is a bind due (the guard looks before it sets up its logging): the last one is 15
+# minutes old, or none yet and the last failed attempt is 5 minutes old
+pf_due() {
+  pf_enabled || return 1
+  wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1 || return 1
+  PDNOW="$(date +%s)"
+  PDLAST="$(awk '{print $2; exit}' "$(pf_statefile)" 2>/dev/null)"
+  if [ -n "$PDLAST" ]; then
+    [ $((PDNOW - PDLAST)) -ge $PF_BIND_EVERY ]
+  else
+    PDTRY="$(cat "$RUNDIR/portfwd.try.$PIAWG_IF" 2>/dev/null)"
+    [ -n "$PDTRY" ] && [ $((PDNOW - PDTRY)) -ge 300 ]
+  fi
+}
+
+# The port is not forwarded any more (option off, interface stopped or removed)
+pf_stop() {
+  rm -f "$(pf_statefile)"
+}
+
 # Confirm the tunnel and apply stage 2; recover (up to 3 times) when stage 1 fails
 confirm_tunnel() {
   CTA=0
@@ -3068,6 +3283,7 @@ confirm_tunnel() {
         fi
         rm -f "$RUNDIR/confirm.fail.$PIAWG_IF"
         history_add confirm ok "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "handshake and DNS answer confirmed, routes applied"
+        pf_run >&3
         return 0
       fi
       CTWHY='the interface could not be updated'
@@ -3184,6 +3400,7 @@ guard_needed() {
 }
 
 guard_cmd() {
+  pf_run keepalive >&3
   guard_needed || return 0
   GA="$(handshake_age)" || GA=''
   if [ -n "$GA" ]; then
@@ -3618,6 +3835,11 @@ api_iface_json() {
     --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
     --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
     --arg boot "$(uci -q get "pia.$PIAWG_IF.iface_auto")" \
+    --arg pfe "$(uci -q get "pia.$PIAWG_IF.pf_enable")" \
+    --arg pfip "$(uci -q get "pia.$PIAWG_IF.pf_ip")" \
+    --arg pfdp "$(uci -q get "pia.$PIAWG_IF.pf_port")" \
+    --arg pfport "$([ "$AIUP" = true ] && awk '{print $1; exit}' "$(pf_statefile)" 2>/dev/null)" \
+    --arg pfcap "$(jq -r --arg r "$(uci -q get "pia.$PIAWG_IF.region_id")" '.regions[] | select(.id == $r) | .port_forward' "$(cache_dir)/servers.json" 2>/dev/null)" \
     --argjson up "$AIUP" --arg hs "$AIHS" --arg ep "$AIEP" \
     --argjson job "$(api_job_json "$PIAWG_IF")" \
     '{name: $name,
@@ -3627,7 +3849,8 @@ api_iface_json() {
       streaming: ($rdns | contains("-so.")),
       mtu: ($mtu | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
-      dip: ($dip != ""), boot: ($boot == "1"), up: $up, handshake: ($hs | tonumber? // null),
+      dip: ($dip != ""), boot: ($boot == "1"),
+      portfwd: {enabled: ($pfe == "1"), ip: $pfip, dest_port: ($pfdp | tonumber? // null), port: ($pfport | tonumber? // null), capable: ($pfcap != "false")}, up: $up, handshake: ($hs | tonumber? // null),
       endpoint: ($ep | if . == "" then null else . end), job: $job}'
 }
 
@@ -3781,12 +4004,13 @@ api_job() {
 #   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace|custom
 #   dns_ip=<IPv4 of a custom DNS server>  mtu=std|small|<1280-1420>
 #   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
+#   portfwd=yes|no  pf_ip=<IPv4 behind the router>  pf_port=<port there; empty: the forwarded one>
 #   boot=yes|no (netifd starts it at boot)  forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
 api_iface_save() {
   AN="$1"
   shift
   valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
-  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT=''
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET=''
   for AKV in "$@"; do
     AV="${AKV#*=}"
     case "$AKV" in
@@ -3805,6 +4029,15 @@ api_iface_save() {
       ;;
     strict=*) A_STRICT="$AV" ;;
     boot=*) A_BOOT="$AV" ;;
+    portfwd=*) A_PF="$AV" ;;
+    pf_ip=*)
+      A_PFIP="$AV"
+      A_PFSET=1
+      ;;
+    pf_port=*)
+      A_PFPORT="$AV"
+      A_PFSET=1
+      ;;
     *) api_fail "Unknown setting '${AKV%%=*}'" ;;
     esac
   done
@@ -3819,6 +4052,13 @@ api_iface_save() {
   case "$A_FW" in '' | yes | no) ;; *) api_fail "Invalid firewall choice" ;; esac
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_BOOT" in '' | yes | no) ;; *) api_fail "Invalid boot choice" ;; esac
+  case "$A_PF" in '' | yes | no) ;; *) api_fail "Invalid port forwarding choice" ;; esac
+  [ -z "$A_PFIP" ] || valid_ipv4 "$A_PFIP" || api_fail "Destination IP address: an IPv4 address"
+  case "$A_PFPORT" in
+  '') ;;
+  *[!0-9]*) api_fail "Destination port: digits only, 1 to 65535" ;;
+  *) [ "$A_PFPORT" -ge 1 ] && [ "$A_PFPORT" -le 65535 ] || api_fail "Destination port: digits only, 1 to 65535" ;;
+  esac
   case "$A_MTU" in
   '' | std | small) ;;
   *)
@@ -3974,6 +4214,24 @@ api_iface_save() {
     NETCHANGED='' SESSCHANGED=''
     ensure_iface
   fi
+  # port forwarding: the option, the destination, and the redirect at once if the tunnel is up
+  if [ -n "$A_PF" ] || [ -n "$A_PFSET" ]; then
+    case "$A_PF" in
+    yes) uci -q set "pia.$AN.pf_enable=1" ;;
+    no) uci -q delete "pia.$AN.pf_enable" ;;
+    esac
+    if [ -n "$A_PFSET" ]; then
+      if [ -n "$A_PFIP" ]; then uci -q set "pia.$AN.pf_ip=$A_PFIP"; else uci -q delete "pia.$AN.pf_ip"; fi
+      if [ -n "$A_PFPORT" ]; then uci -q set "pia.$AN.pf_port=$A_PFPORT"; else uci -q delete "pia.$AN.pf_port"; fi
+    fi
+    uci -q commit pia
+    if pf_enabled; then
+      if [ -z "$AWNEW" ] && wgt "$AN" show "$AN" >/dev/null 2>&1 && session_valid; then pf_run >&3; fi
+    else
+      pf_fw_sync '' >&3
+      pf_stop
+    fi
+  fi
   # dnsmasq: strict order follows the default route
   [ "$A_STRICT" = 'no' ] || strict_sync >/dev/null
   # the first interface of a router that was deployed without the cron jobs
@@ -4081,6 +4339,7 @@ if [ "$1" = 'guard' ]; then
     PIAWG_IF="$GX"
     set_ifvars
     guard_needed && GNEED=1
+    pf_due && GNEED=1
   done
   [ -n "$GNEED" ] || exit 0
   PIAWG_IF="$GSAVE"
@@ -4359,6 +4618,19 @@ case "$1" in
     echo "Session key: RAM only, registered $(($(date +%s) - $(session_get time)))s ago on $(session_get server_ip)"
   else
     echo "Session key: none (made at the next start, renew or ifup)"
+  fi
+  if pf_enabled; then
+    PFSP="$(awk '{print $1; exit}' "$(pf_statefile)" 2>/dev/null)"
+    if [ -n "$PFSP" ]; then
+      PFSI="$(uci -q get "pia.$PIAWG_IF.pf_ip")"
+      if [ -n "$PFSI" ]; then
+        echo "Port forwarding: port $PFSP -> $PFSI:$(uci -q get "pia.$PIAWG_IF.pf_port" || echo "$PFSP")"
+      else
+        echo "Port forwarding: port $PFSP (no destination IP address: not forwarded)"
+      fi
+    else
+      echo "Port forwarding: enabled, no port bound yet"
+    fi
   fi
   if renew_installed; then
     echo "Renew (cron) installed: YES"

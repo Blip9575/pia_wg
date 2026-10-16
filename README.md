@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.10.4 (upstream 1.0.16)
+1.11.0 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -234,6 +234,14 @@ The first run after each boot adds one line, `Boot: up Ns, clock … , version �
 A confirm run that does nothing says why, in one line: `Command skipped (ifup wlan_wan): The interface is down | The interface is up | In back-off after a failed attempt, Ns left | There is no session key` (the brackets name what was trying to run; `The interface is up`, the normal case, stays in the log file and is not sent to the syslog).
 
 Firmware upgrades and LuCI backups: `renew install` and `luci install` add the hook and the LuCI app files to `/etc/sysupgrade.conf` under `## PIA VPN (kept by pia.sh)` (only the lines that are missing; `luci remove` and `renew remove` take theirs out). `/etc/config/pia`, the network and firewall configuration and the cron entries are kept by OpenWrt already; the session key (RAM), the cache and the log are not meant to be kept.
+
+## Port forwarding
+
+PIA shares each server's address between its users and blocks incoming connections; port forwarding opens one inbound port on your session, which PIA picks. It is for a service behind the router that must be reached from outside (a torrent client accepting peers, a game or media server). The port is the same for TCP and UDP, only some regions offer it (the region list shows them), and anyone who learns the server address and port can connect to what you forward: leave it off unless you need it.
+
+The script does it the way the official apps do. Once the tunnel is confirmed it asks the server (`https://<server address inside the tunnel>:19999`, the PIA CA, the server's name) for a signature with the API token (`getSignature`) and opens the port with it (`bindPort`), and the guard repeats the bind every 15 minutes. A new signature means a new port, so the token (payload and signature) is kept in the Cache Path, `portfwd.NAME.json`, and reused while a week of it is left (about two months in all); the port stays the same across restarts until the token expires, the region's server changes, or a bind is refused (then one new token is tried). Nothing is written to the flash. A failed attempt is repeated every 5 minutes.
+
+Set it in LuCI (Edit interface: **Port forwarding**, then **Destination IP address** and **Destination Port**) or with `pia.sh api iface-save NAME portfwd=yes pf_ip=192.168.1.50 pf_port=8080` (`pf_port` empty: the forwarded port). With a destination the script keeps a firewall redirect (`PIA port forward NAME`, marked `pia_managed_pf`, TCP and UDP, DNAT to the destination, which fw4 also accepts inbound) for the port; it is changed only when the port changes (a firewall check and reload then) and removed when the option is turned off or the interface is removed. The destination's zone is the one of the zones forwarding into the interface whose network holds the address. It needs the firewall zone; it is not available with a dedicated IP. Without a destination the port is held and shown but not forwarded. `pia.sh status` and the Interfaces table show the port. UCI: `pf_enable`, `pf_ip`, `pf_port`.
 
 ## History
 `history.json` in the cache path records what happened with the servers: key registrations (server, HTTP code, time taken, accepted or refused), the pings of the fastest-region choice, tunnel confirmations and guard actions, each with country, region, server IP, latency and status (never tokens or keys). Entries are collected in RAM and written once when a run ends, to the cache path only (RAM if the USB drive is not mounted), and the file keeps the latest 200. `pia.sh api history` prints it with a per-region summary; LuCI shows both under *History* on the PIA VPN page. `pia.sh history probe [--rounds N] [--delay S] REGION|COUNTRY…` (for example `history probe GB`) asks the servers of the regions whether they accept the VPN token, N times (default 8, 3 s apart), with an invalid public key: nothing is registered, and the servers in use by an interface are skipped (a request removes the key the token has on that server). Each answer is recorded as a *Token probe* and counted in the region summary. A region whose servers refuse a share of the registrations at random (uk_manchester refused about 60% of the requests in a 2026-10-16 measurement) is easy to see there.
