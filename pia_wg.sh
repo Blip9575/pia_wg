@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.9.5
+# Version: 1.9.6
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2927,7 +2927,7 @@ confirm_cmd() {
     return 0
   }
   confirm_done && {
-    echo "$CCW The tunnel is up" >&3
+    echo "$CCW The interface is up" >&3
     return 0
   }
   if [ "$1" != '--force' ]; then
@@ -3942,7 +3942,7 @@ elif [ "$AUTO" ]; then
   esac
   awk -v lf="$PIALOG" -v date="$(date)" -v tag="pia[$$]" -v pre="PIA: $SLIF" -v sl="$SYSLOGOK" '
     {print; printf("[%s] %s\n",date,$0) >> lf}
-    sl && NF && !($0 in seen) && $0 !~ /^Command skipped.*: The tunnel is up$/ {
+    sl && NF && !($0 in seen) && $0 !~ /^Command skipped.*: The interface is up$/ {
       seen[$0]
       m = $0
       sub(/^[ \t]+/, "", m)
