@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.9.3
+# Version: 1.9.4
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -3093,6 +3093,39 @@ done
 EOF
 }
 
+# Files kept by a firmware upgrade or a LuCI backup (/etc/sysupgrade.conf). The
+# configuration (/etc/config/pia, network, firewall) and the cron entries are
+# kept by OpenWrt already; the session key, the cache and the log are not wanted.
+SYSUPG='/etc/sysupgrade.conf'
+backup_paths() {
+  case "$1" in
+  core) printf '%s\n' "$SCRIPTPATH" "$HOOKFILE" ;;
+  luci) printf '%s\n' /www/luci-static/resources/view/pia/ /usr/share/luci/menu.d/luci-app-pia.json /usr/share/rpcd/acl.d/luci-app-pia.json /usr/share/rpcd/ucode/luci.pia ;;
+  esac
+}
+# Add the missing lines in one write (nothing is written when all are there)
+backup_add() {
+  BKNEW=''
+  for BKP in $(backup_paths "$1"); do
+    grep -qxF "$BKP" "$SYSUPG" 2>/dev/null || BKNEW="$BKNEW$BKP
+"
+  done
+  [ -n "$BKNEW" ] || return 0
+  {
+    grep -qxF '## PIA VPN (kept by pia.sh)' "$SYSUPG" 2>/dev/null || printf '\n## PIA VPN (kept by pia.sh)\n'
+    printf '%s' "$BKNEW"
+  } >>"$SYSUPG"
+}
+backup_remove() {
+  [ -f "$SYSUPG" ] || return 0
+  BKTMP="$RUNDIR/sysupgrade.$$"
+  backup_paths "$1" >"$BKTMP.rm"
+  # the script's own line stays (it was listed before this version managed it)
+  grep -vxFf "$BKTMP.rm" "$SYSUPG" >"$BKTMP"
+  cmp -s "$BKTMP" "$SYSUPG" || cat "$BKTMP" >"$SYSUPG"
+  rm -f "$BKTMP" "$BKTMP.rm"
+}
+
 hook_install() {
   [ "$(hook_content)" = "$(cat "$HOOKFILE" 2>/dev/null)" ] && return 0
   hook_content >"$HOOKFILE.new" && chmod 755 "$HOOKFILE.new" && mv "$HOOKFILE.new" "$HOOKFILE"
@@ -3100,6 +3133,7 @@ hook_install() {
 
 renew_install() {
   hook_install
+  backup_add core
   watchdog_strip
   guard_install
   grep -qF "/bin/sh $SCRIPTPATH renew $CRON_TAG_RENEW" /etc/crontabs/root 2>/dev/null && return 0
@@ -3112,6 +3146,8 @@ renew_install() {
 
 renew_remove() {
   rm -f "$HOOKFILE"
+  grep -qxF "$HOOKFILE" "$SYSUPG" 2>/dev/null && grep -vxF "$HOOKFILE" "$SYSUPG" >"$RUNDIR/sysupgrade.$$" && cat "$RUNDIR/sysupgrade.$$" >"$SYSUPG"
+  rm -f "$RUNDIR/sysupgrade.$$"
   guard_remove
   renew_installed || return 0
   crontab -l | grep -vF "$CRON_TAG_RENEW" | crontab -
@@ -3274,6 +3310,7 @@ luci_install() {
     sed "s|/usr/bin/pia.sh|$SCRIPTPATH|g" "$LITMP/$LIN" >"$LIDST"
   done
   rm -rf "$LITMP"
+  backup_add luci
   luci_reload
   jobs_deploy
   echo "LuCI app installed: Services > PIA VPN (log in to LuCI again)"
@@ -3282,6 +3319,7 @@ luci_install() {
 luci_remove() {
   for LIX in $LUCI_FILES; do rm -f "${LIX#*:}"; done
   rmdir /www/luci-static/resources/view/pia 2>/dev/null
+  backup_remove luci
   luci_reload
   echo "LuCI app removed"
 }
