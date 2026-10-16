@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.9.4
+# Version: 1.9.5
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2921,23 +2921,24 @@ confirm_tunnel() {
 # confirm [--force]: nothing when the interface is down or already confirmed;
 # after a failure not again within 2 minutes (unless --force)
 confirm_cmd() {
+  CCW="Command skipped${CONFIRM_BY:+ ($CONFIRM_BY)}:"
   wgt "$PIAWG_IF" show "$PIAWG_IF" >/dev/null 2>&1 || {
-    echo "Confirm: nothing to do, the interface is not up" >&3
+    echo "$CCW The interface is down" >&3
     return 0
   }
   confirm_done && {
-    echo "Confirm: nothing to do, the tunnel is already confirmed (handshake, DNS server and routes in place)" >&3
+    echo "$CCW The tunnel is up" >&3
     return 0
   }
   if [ "$1" != '--force' ]; then
     CCF="$(cat "$RUNDIR/confirm.fail.$PIAWG_IF" 2>/dev/null)"
     if [ $(($(date +%s) - ${CCF:-0})) -lt 120 ]; then
-      echo "Confirm: nothing to do yet, the last attempt did not succeed, $(($(date +%s) - CCF))s ago (next try after 120s)" >&3
+      echo "$CCW In back-off after a failed attempt, $((120 - $(date +%s) + CCF))s left" >&3
       return 0
     fi
   fi
   session_valid || {
-    echo "Confirm: nothing to do, no session key yet (made at the next start or renew)" >&3
+    echo "$CCW There is no session key" >&3
     return 0
   }
   confirm_tunnel
@@ -3169,7 +3170,7 @@ hook_cmd() {
     [ -n "$HEP" ] && endpoint_route "$HEP" pin
     # up with nothing registered: make the session, which restarts it
     session_staged || /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" renew --if-missing --apply
-    /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" confirm
+    CONFIRM_BY="ifup $2" /bin/sh "$SCRIPTPATH" -i "$PIAWG_IF" confirm
   else
     # another interface: a WAN that came back may need our session and a new gateway
     for HX in $(iface_list); do
@@ -3182,7 +3183,7 @@ hook_cmd() {
       /bin/sh "$SCRIPTPATH" -i "$HX" renew --if-missing $HXA
       HEP="$(sget "network.$PIAWG_PEER.endpoint_host")"
       [ -n "$HEP" ] && endpoint_route "$HEP" pin
-      /bin/sh "$SCRIPTPATH" -i "$HX" confirm
+      CONFIRM_BY="ifup $2" /bin/sh "$SCRIPTPATH" -i "$HX" confirm
     done
   fi
   return 0
@@ -3941,7 +3942,7 @@ elif [ "$AUTO" ]; then
   esac
   awk -v lf="$PIALOG" -v date="$(date)" -v tag="pia[$$]" -v pre="PIA: $SLIF" -v sl="$SYSLOGOK" '
     {print; printf("[%s] %s\n",date,$0) >> lf}
-    sl && NF && !($0 in seen) {
+    sl && NF && !($0 in seen) && $0 !~ /^Command skipped.*: The tunnel is up$/ {
       seen[$0]
       m = $0
       sub(/^[ \t]+/, "", m)

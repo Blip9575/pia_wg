@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.9.4 (upstream 1.0.16)
+1.9.5 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -217,7 +217,7 @@ What unattended runs print (cron, the ifup hook, LuCI jobs) also goes to the sys
 
 The first run after each boot adds one line, `Boot: up Ns, clock … , version …; NAME: session key yes|no, bring up on boot yes|no` (RAM only, once per boot). The router has no battery clock, so lines logged before the clock is synchronised carry the last saved time and the next lines jump forward; the `up Ns` tells how long the boot had run. A VPN token refusal names the answer: `PIA refused the VPN token (HTTP 401 from SERVER: message); trying again in 5s`.
 
-A confirm run that has nothing to do says why (`Confirm: nothing to do, …`: interface not up, tunnel already confirmed, back-off after a failed attempt, or no session key yet), so a hook run is never silent.
+A confirm run that does nothing says why, in one line: `Command skipped (ifup wlan_wan): The interface is down | The tunnel is up | In back-off after a failed attempt, Ns left | There is no session key` (the brackets name what was trying to run; `The tunnel is up`, the normal case, stays in the log file and is not sent to the syslog).
 
 Firmware upgrades and LuCI backups: `renew install` and `luci install` add the hook and the LuCI app files to `/etc/sysupgrade.conf` under `## PIA VPN (kept by pia.sh)` (only the lines that are missing; `luci remove` and `renew remove` take theirs out). `/etc/config/pia`, the network and firewall configuration and the cron entries are kept by OpenWrt already; the session key (RAM), the cache and the log are not meant to be kept.
 
