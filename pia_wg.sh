@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.9.6
+# Version: 1.9.7
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1051,9 +1051,10 @@ pia_addkey_any() {
   if [ "$PIAAUTH" = 'vpn' ]; then
     pia_addkey && return 0
     [ "$ADDKEYAUTHFAIL" ] || return 1
-    # A refusal is often a burst that hits the whole region and passes: wait
-    # before blaming the token (renewing it does not help then)
-    for AKW in 5 15 30; do
+    # A refusal is often random per request (measured on uk_manchester: about 60%
+    # of the requests, cold or not), so the first retry is quick; renewing the
+    # token does not help then
+    for AKW in 1 5 15 30; do
       echo "PIA refused the VPN token ($ADDKEYWHY); trying again in ${AKW}s" >&3
       sleep "$AKW"
       pia_addkey && return 0

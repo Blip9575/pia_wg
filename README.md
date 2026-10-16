@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.9.6 (upstream 1.0.16)
+1.9.7 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -215,7 +215,7 @@ The log can be displayed using `pia_wg.sh log show` and cleared using `pia_wg_sh
 
 What unattended runs print (cron, the ifup hook, LuCI jobs) also goes to the system log (`logread | grep pia`), like other daemons do: tag `pia[PID]`, facility `daemon`, lines starting `PIA: ` and, for an interface, `PIA: [name] `; failures are warnings.
 
-The first run after each boot adds one line, `Boot: up Ns, clock … , version …; NAME: session key yes|no, bring up on boot yes|no` (RAM only, once per boot). The router has no battery clock, so lines logged before the clock is synchronised carry the last saved time and the next lines jump forward; the `up Ns` tells how long the boot had run. A VPN token refusal names the answer: `PIA refused the VPN token (HTTP 401 from SERVER: message); trying again in 5s`.
+The first run after each boot adds one line, `Boot: up Ns, clock … , version …; NAME: session key yes|no, bring up on boot yes|no` (RAM only, once per boot). The router has no battery clock, so lines logged before the clock is synchronised carry the last saved time and the next lines jump forward; the `up Ns` tells how long the boot had run. A VPN token refusal names the answer: `PIA refused the VPN token (HTTP 401 from SERVER: message); trying again in 1s` (then 5, 15 and 30 s: a refusal is often random per request, as with uk_manchester, so the first retry is quick).
 
 A confirm run that does nothing says why, in one line: `Command skipped (ifup wlan_wan): The interface is down | The interface is up | In back-off after a failed attempt, Ns left | There is no session key` (the brackets name what was trying to run; `The interface is up`, the normal case, stays in the log file and is not sent to the syslog).
 
