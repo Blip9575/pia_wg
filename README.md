@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.13.0 (upstream 1.0.16)
+1.13.1 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -239,7 +239,7 @@ Firmware upgrades and LuCI backups: `renew install` and `luci install` add the h
 
 ## Bring up on boot, with a delay
 
-**Bring up on boot** (LuCI, or `pia.sh api iface-save NAME boot=yes`) lets netifd start the tunnel as soon as the network is up. With a **Delay before bring up** above 0 (`boot_delay=SECONDS`, 1 to 3600, counted from the router's start) netifd is told not to start it (network `auto 0`) and the ifup hook does it instead: at the first interface that comes up after a boot, the hook starts a background job per delayed interface that waits until the router has been up that long and then runs `ifup NAME` (nothing if it is already up, for example started by travelmate). The normal ifup work follows (key registration, confirmation, port forwarding). The syslog line is `Boot: NAME is brought up in Ns (D s after boot)`, and the `Boot:` summary shows `bring up on boot yes, after Ds`. A delay needs the hook (`renew install`; the API refuses a delay without it); a delay of 0 changes nothing and uses no hook.
+**Bring up on boot** (LuCI, or `pia.sh api iface-save NAME boot=yes`) lets netifd start the tunnel as soon as the network is up. With a **Delay before bring up** above 0 (LuCI proposes 60 seconds when the hook is installed; `boot_delay=SECONDS`, 1 to 3600, counted from the router's start) netifd is told not to start it (network `auto 0`) and the ifup hook does it instead: at the first interface that comes up after a boot, the hook starts a background job per delayed interface that waits until the router has been up that long and then runs `ifup NAME` (nothing if it is already up, for example started by travelmate). The normal ifup work follows (key registration, confirmation, port forwarding). The syslog line is `Boot: NAME is brought up in Ns (D s after boot)`, and the `Boot:` summary shows `bring up on boot yes, after Ds`. A delay needs the hook (`renew install`; the API refuses a delay without it); a delay of 0 changes nothing and uses no hook.
 
 ## Port forwarding
 

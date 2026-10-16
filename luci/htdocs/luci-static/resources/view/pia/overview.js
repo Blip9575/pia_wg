@@ -590,7 +590,7 @@ return view.extend({
 		}
 		const fwCb = checkbox(adding ? true : i.firewall);
 		const bdInp = E('input', { 'class': 'cbi-input-text', 'type': 'number', 'min': 0, 'max': 3600, 'step': 1, 'style': 'width:7em',
-			'value': String(adding ? 0 : (i.boot_delay || 0)) });
+			'value': String(adding || !i.boot ? (st.hook ? 60 : 0) : (i.boot_delay || 0)) });
 		const bdBox = field(_('Delay before bring up'), bdInp, _('Seconds after the router starts; 0 brings it up as soon as the network starts. Needs the ifup hook.'));
 		const bootCb = checkbox(adding ? false : i.boot, () => { bdBox.style.display = bootCb.checked ? '' : 'none'; });
 		bdBox.style.display = !adding && i.boot ? '' : 'none';
