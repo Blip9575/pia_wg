@@ -24,7 +24,7 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, boot: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, ipv6: 1, boot: 1 }
 });
 function callSave(args) {
 	const o = {};
@@ -287,9 +287,9 @@ return view.extend({
 		const save = () => {
 			const id = idIn.value.trim(), pw = pwIn.value, path = pathIn.value.trim() || '/mnt/usb/pia';
 			if (!id || (!pw && !acc.password_set))
-				return fail({ error: _('Enter the PIA user ID (p1234567) and the password') });
+				return fail({ error: _('Enter your PIA username and password') });
 			if (!pw && id != acc.id)
-				return fail({ error: _('Enter the password with the new user ID') });
+				return fail({ error: _('Enter the password with the new username') });
 			// written to flash only when something changed
 			const changed = pw || id != acc.id || path != ((st.cache && st.cache.path) || '/mnt/usb/pia');
 			const first = changed ? callAccount({ id: id, password: pw, path: path }) : Promise.resolve({ ok: true });
@@ -304,10 +304,10 @@ return view.extend({
 			E('div', { 'class': 'cbi-value-field' }, content) ]);
 
 		return E('div', { 'class': 'cbi-section' }, [
-			E('h3', _('Account')),
+			E('h3', _('Sign in to your account')),
 			E('div', { 'class': 'cbi-section-descr' }, _('PIA credentials.')),
-			field(_('User ID'), idIn, _('Starts with a p followed by digits.')),
-			field(_('Password'), pwIn),
+			field(_('Username'), idIn, _('Enter your PIA username')),
+			field(_('Password'), pwIn, _('Enter your PIA password')),
 			field(_('Cache Path'), pathIn, _('Recommend external flash drive for servers list and token')),
 			row(_('Login Status'), loginStatus),
 			row('', E('button', { 'class': 'cbi-button cbi-button-save', 'click': ui.createHandlerFn(this, save) }, _('Save and log in'))),
@@ -341,6 +341,7 @@ return view.extend({
 		if (i.keepalive != null && i.keepalive != KEEPALIVE) parts.push(i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive'));
 		parts.push(i.default_route ? _('default route') : _('no default route'));
 		if (i.firewall) parts.push(_('zone %s').format(i.name) + (i.forward.length ? ' ← ' + i.forward.join(', ') : ''));
+		if (i.firewall && i.ipv6 == 'drop') parts.push(_('IPv6 dropped'));
 		if (i.dip) parts.push(_('dedicated IP'));
 		return E('small', parts.join(' · '));
 	},
@@ -577,6 +578,10 @@ return view.extend({
 		}
 		const fwCb = checkbox(adding ? true : i.firewall);
 		const bootCb = checkbox(adding ? false : i.boot);
+		const ip6Ctl = selectHelp([
+			[ 'reject', _('Reject at once'), _('Recommended: the tunnel carries no IPv6, so devices fall back to IPv4 without waiting') ],
+			[ 'drop', _('Drop silently'), _('IPv6 connections wait for a timeout before devices fall back to IPv4') ]
+		], adding || i.ipv6 != 'drop' ? 'reject' : 'drop');
 		const zones = st.zones.filter(z => (adding || z != i.name) && !/^Block-/.test(z));
 		const fwd = adding ? (st.lan_zone ? [ st.lan_zone ] : []) : i.forward;
 		const boxes = zones.map(z => [ z, checkbox(fwd.indexOf(z) >= 0) ]);
@@ -630,6 +635,7 @@ return view.extend({
 				route: routeCb.disabled ? null : (routeCb.checked ? 'yes' : 'no'),
 				firewall: fwCb.checked ? 'yes' : 'no',
 				forward: fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
+				ipv6: ip6Ctl.node.value,
 				boot: bootCb.checked ? 'yes' : 'no'
 			}).then(r => {
 				ui.hideModal();
@@ -669,6 +675,7 @@ return view.extend({
 				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('The zones whose traffic may go through this VPN.')),
+				field(_('IPv6 into the tunnel'), ip6Ctl.node, ip6Ctl.help),
 				field(_('Bring up on boot'), bootCb, _('Enable to connect on boot')),
 				err,
 				E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ' ].concat(buttons))

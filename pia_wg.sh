@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.10.2
+# Version: 1.10.3
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1526,6 +1526,41 @@ fw_apply_inner() {
     uci -q set "firewall.$FWF.pia_managed=1"
     FWCHANGED=1
   done
+  # IPv6 sent into the tunnel is lost (PIA gives the tunnel no IPv6), so answer it at once
+  # and the clients fall back to IPv4 without waiting; 'drop' leaves it to time out
+  FWRWANT=''
+  [ "$(uci -q get "pia.$PIAWG_IF.fw_ipv6")" = 'drop' ] || FWRWANT="$FWWANT"
+  FWN=0
+  FWRHAVE=' '
+  while uci -q get "firewall.@rule[$FWN]" >/dev/null; do FWN=$((FWN + 1)); done
+  FWI=$((FWN - 1))
+  while [ "$FWI" -ge 0 ]; do
+    if [ "$(uci -q get "firewall.@rule[$FWI].pia_managed_if")" = "$PIAWG_IF" ]; then
+      FWS="$(uci -q get "firewall.@rule[$FWI].src")"
+      case "$FWRWANT" in
+      *" $FWS "*) FWRHAVE="$FWRHAVE$FWS " ;;
+      *)
+        uci -q delete "firewall.@rule[$FWI]"
+        FWCHANGED=1
+        ;;
+      esac
+    fi
+    FWI=$((FWI - 1))
+  done
+  for FWS in $FWRWANT; do
+    case "$FWRHAVE" in
+    *" $FWS "*) continue ;;
+    esac
+    FWF="$(uci -q add firewall rule)"
+    uci -q set "firewall.$FWF.name=PIA IPv6 reject $FWS to $PIAWG_IF"
+    uci -q set "firewall.$FWF.src=$FWS"
+    uci -q set "firewall.$FWF.dest=$PIAWG_IF"
+    uci -q set "firewall.$FWF.family=ipv6"
+    uci -q set "firewall.$FWF.proto=all"
+    uci -q set "firewall.$FWF.target=REJECT"
+    uci -q set "firewall.$FWF.pia_managed_if=$PIAWG_IF"
+    FWCHANGED=1
+  done
   [ -z "$FWCHANGED" ] || uci -q commit firewall
   return 0
 }
@@ -1540,6 +1575,16 @@ fw_remove_inner() {
     if [ "$(uci -q get "firewall.@forwarding[$FWI].dest")" = "$PIAWG_IF" ] &&
       [ "$(uci -q get "firewall.@forwarding[$FWI].pia_managed")" = '1' ]; then
       uci -q delete "firewall.@forwarding[$FWI]"
+      FWCHANGED=1
+    fi
+    FWI=$((FWI - 1))
+  done
+  FWN=0
+  while uci -q get "firewall.@rule[$FWN]" >/dev/null; do FWN=$((FWN + 1)); done
+  FWI=$((FWN - 1))
+  while [ "$FWI" -ge 0 ]; do
+    if [ "$(uci -q get "firewall.@rule[$FWI].pia_managed_if")" = "$PIAWG_IF" ]; then
+      uci -q delete "firewall.@rule[$FWI]"
       FWCHANGED=1
     fi
     FWI=$((FWI - 1))
@@ -3608,6 +3653,7 @@ api_iface_json() {
     --argjson route "$AIDR" \
     --arg fw "$(uci -q get "pia.$PIAWG_IF.fw_zone")" \
     --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
+    --arg ip6 "$(uci -q get "pia.$PIAWG_IF.fw_ipv6")" \
     --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
     --arg boot "$(uci -q get "pia.$PIAWG_IF.iface_auto")" \
     --argjson up "$AIUP" --arg hs "$AIHS" --arg ep "$AIEP" \
@@ -3619,6 +3665,7 @@ api_iface_json() {
       streaming: ($rdns | contains("-so.")),
       mtu: ($mtu | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
+      ipv6: (if $ip6 == "drop" then "drop" else "reject" end),
       dip: ($dip != ""), boot: ($boot == "1"), up: $up, handshake: ($hs | tonumber? // null),
       endpoint: ($ep | if . == "" then null else . end), job: $job}'
 }
@@ -3773,12 +3820,13 @@ api_job() {
 #   proto=amneziawg|wireguard|auto  region=<id>  fast=0|1  dns=standard|mace|custom
 #   dns_ip=<IPv4 of a custom DNS server>  mtu=std|small|<1280-1420>
 #   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
+#   ipv6=reject|drop (IPv6 into the tunnel: answered at once or dropped)
 #   boot=yes|no (netifd starts it at boot)  forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
 api_iface_save() {
   AN="$1"
   shift
   valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
-  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT=''
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_IP6=''
   for AKV in "$@"; do
     AV="${AKV#*=}"
     case "$AKV" in
@@ -3797,6 +3845,7 @@ api_iface_save() {
       ;;
     strict=*) A_STRICT="$AV" ;;
     boot=*) A_BOOT="$AV" ;;
+    ipv6=*) A_IP6="$AV" ;;
     *) api_fail "Unknown setting '${AKV%%=*}'" ;;
     esac
   done
@@ -3811,6 +3860,7 @@ api_iface_save() {
   case "$A_FW" in '' | yes | no) ;; *) api_fail "Invalid firewall choice" ;; esac
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_BOOT" in '' | yes | no) ;; *) api_fail "Invalid boot choice" ;; esac
+  case "$A_IP6" in '' | reject | drop) ;; *) api_fail "Invalid IPv6 choice" ;; esac
   case "$A_MTU" in
   '' | std | small) ;;
   *)
@@ -3929,6 +3979,11 @@ api_iface_save() {
   yes) has_default_route "$AN" || set_default_route yes ;;
   no) ! has_default_route "$AN" || set_default_route no ;;
   esac
+  case "$A_IP6" in
+  reject) uci -q delete "pia.$AN.fw_ipv6" ;;
+  drop) uci -q set "pia.$AN.fw_ipv6=drop" ;;
+  esac
+  uci -q commit pia
   # the firewall zone, NAT and forwardings
   case "$A_FW" in
   yes)
@@ -3948,10 +4003,12 @@ api_iface_save() {
     uci -q commit pia
     ;;
   '')
-    if [ -n "$A_FWDSET" ] && [ "$(uci -q get "pia.$AN.fw_zone")" = '1' ]; then
-      uci -q delete "pia.$AN.fw_forward"
-      for AZ in $A_FWD; do uci -q add_list "pia.$AN.fw_forward=$AZ"; done
-      uci -q commit pia
+    if { [ -n "$A_FWDSET" ] || [ -n "$A_IP6" ]; } && [ "$(uci -q get "pia.$AN.fw_zone")" = '1' ]; then
+      if [ -n "$A_FWDSET" ]; then
+        uci -q delete "pia.$AN.fw_forward"
+        for AZ in $A_FWD; do uci -q add_list "pia.$AN.fw_forward=$AZ"; done
+        uci -q commit pia
+      fi
       fw_apply >&3
     fi
     ;;
