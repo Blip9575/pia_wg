@@ -122,7 +122,7 @@ const DNSOPTS = [
 const MTU_MIN = 1280, MTU_MAX = 1420, KEEPALIVE = 25;
 const KEEPOPTS = [
 	[ 'default', _('Default (%d)').format(KEEPALIVE), _('The value of the official PIA apps.') ],
-	[ 'off', _('Disabled (0)'), _('No keepalive packets: a NAT or firewall in between may drop the idle tunnel.') ],
+	[ 'off', _('Disabled (0)'), _('No keepalive packets: a NAT or firewall in between may drop the idle tunnel, and the guard (which looks for a stale handshake) is switched off.') ],
 	[ 'custom', _('Custom'), _('Seconds between keepalive packets.') ]
 ];
 
@@ -341,6 +341,7 @@ return view.extend({
 		if (i.keepalive != null && i.keepalive != KEEPALIVE) parts.push(i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive'));
 		parts.push(i.default_route ? _('default route') : _('no default route'));
 		if (i.firewall) parts.push(_('zone %s').format(i.name) + (i.forward.length ? ' ← ' + i.forward.join(', ') : ''));
+		if (i.mss && !i.mss.clamp) parts.push('⚠ ' + _('no MSS clamping'));
 		const ksw = i.killswitch;
 		if (ksw && ksw.enabled) parts.push(_('kill switch'));
 		if (ksw && ksw.leaks && ksw.leaks.length)
@@ -588,7 +589,9 @@ return view.extend({
 			routeCb.disabled = true;
 			routeCb.checked = !adding && i.default_route;
 		}
-		const fwCb = checkbox(adding ? true : i.firewall);
+		const fwWarn = E('div', { 'style': 'color:#d97706' }, _('Without the zone there is no MSS clamping: large TCP transfers can stall on a smaller path.'));
+		const fwCb = checkbox(adding ? true : i.firewall, () => { fwWarn.style.display = fwCb.checked ? 'none' : ''; });
+		fwWarn.style.display = (adding || i.firewall) ? 'none' : '';
 		const bdInp = E('input', { 'class': 'cbi-input-text', 'type': 'number', 'min': 0, 'max': 3600, 'step': 1, 'style': 'width:7em',
 			'value': String(adding || !i.boot ? (st.hook ? 60 : 0) : (i.boot_delay || 0)) });
 		const bdBox = field(_('Delay before bring up'), bdInp, _('Seconds after the router starts; 0 brings it up as soon as the network starts. Needs the ifup hook.'));
@@ -727,7 +730,7 @@ return view.extend({
 				field(_('Keepalive'), keepBox, keepCtl.help),
 				field(_('DNS servers'), dnsBox, dnsCtl.help),
 				field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : [ E('div', _('Recommended to send all traffic via PIA.')), E('div', _('Enables strict DNS to prevent DNS leakage')) ]),
-				field(_('Firewall zone'), fwCb, _('Recommended to create zone with NAT and MSS clamping')),
+				field(_('Firewall zone'), fwCb, [ E('div', _('Recommended to create zone with NAT and MSS clamping')), fwWarn ]),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('Select internal networks permitted to route traffic via VPN.')),
 				field(_('Kill switch'), ksCb, _('Enable to isolate selected internal networks when VPN is down')),

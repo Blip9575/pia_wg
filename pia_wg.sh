@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.14.1
+# Version: 1.14.2
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1532,6 +1532,27 @@ fw_vpn_zones() {
 
 fw_masq_zones() {
   for FWZ2 in $(fw_zone_names); do fw_zone_masq "$FWZ2" && echo "$FWZ2"; done
+}
+
+# The firewall zone the interface is in (any zone: not only the one this script made)
+fw_iface_zone() {
+  for FIZ in $(fw_zone_names); do
+    case " $(uci -q get "firewall.$(fw_zone_id "$FIZ").network") " in
+    *" $PIAWG_IF "*)
+      echo "$FIZ"
+      return
+      ;;
+    esac
+  done
+}
+
+# Is TCP MSS clamping on for the interface (its zone has mtu_fix)? Prints the zone name
+# and returns 0, or returns 1
+mss_clamp() {
+  MCZ="$(fw_iface_zone)"
+  [ -n "$MCZ" ] || return 1
+  echo "$MCZ"
+  [ "$(uci -q get "firewall.$(fw_zone_id "$MCZ").mtu_fix")" = '1' ]
 }
 
 # The forwardings from the zones that forward into the interface to the zones that
@@ -4039,6 +4060,7 @@ api_iface_json() {
     --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
     --arg boot "$(uci -q get "pia.$PIAWG_IF.iface_auto")" \
     --arg bdelay "$(uci -q get "pia.$PIAWG_IF.boot_delay")" \
+    --arg msszone "$(fw_iface_zone)" --argjson mssok "$(mss_clamp >/dev/null && echo true || echo false)" \
     --arg kse "$(uci -q get "pia.$PIAWG_IF.ks_enable")" \
     --arg ksb "$(uci -q get "pia.$PIAWG_IF.ks_wan")" \
     --arg ksl "$(ks_leaks | tr '\n' ' ')" \
@@ -4057,6 +4079,7 @@ api_iface_json() {
       mtu: ($mtu | tonumber? // null), mtu_auto: ($mtuauto == "1"), mtu_run: ($mturun | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
       firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
       dip: ($dip != ""), boot: ($boot == "1"), boot_delay: ($bdelay | tonumber? // 0),
+      mss: {zone: $msszone, clamp: $mssok},
       killswitch: {enabled: ($kse == "1"), wan: ($ksb | split(" ") | map(select(. != ""))), leaks: ($ksl | split(" ") | map(select(. != "")))},
       portfwd: {enabled: ($pfe == "1"), ip: $pfip, dest_port: ($pfdp | tonumber? // null), port: ($pfport | tonumber? // null), capable: ($pfcap != "false")}, up: $up, handshake: ($hs | tonumber? // null),
       endpoint: ($ep | if . == "" then null else . end), job: $job}'
@@ -4933,6 +4956,16 @@ case "$1" in
     echo "Guard (cron) installed: YES"
   else
     echo "Guard (cron) installed: NO"
+  fi
+  if [ "$(uci -q get "pia.$PIAWG_IF.peer_persistent_keepalive")" = '0' ]; then
+    echo "Guard: off for $PIAWG_IF (the keepalive is disabled: the guard needs it to see a stale tunnel)"
+  fi
+  if MSSZ="$(mss_clamp)"; then
+    echo "MSS clamping: ON (zone $MSSZ)"
+  elif [ -n "$MSSZ" ]; then
+    echo "MSS clamping: OFF (zone $MSSZ has no mtu_fix): large TCP transfers can stall on a smaller path"
+  else
+    echo "MSS clamping: OFF (the interface is in no firewall zone): large TCP transfers can stall on a smaller path"
   fi
   exit $R
   ;;
