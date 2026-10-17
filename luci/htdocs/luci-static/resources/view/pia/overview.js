@@ -333,25 +333,26 @@ return view.extend({
 	},
 
 	settingsLines: function(i) {
-		const L2 = [], warn = [], st = this.st;
+		const warn = [], st = this.st;
 		const yes = _('Yes'), no = _('No'), off = _('Off');
-		L2.push(this.line(_('DNS'), dnsLabel(i)));
 		const mtuAuto = i.mtu_auto || !i.mtu || i.mtu == st.std_mtu;
 		const mtu = i.mtu_auto && i.mtu_run ? i.mtu_run : (i.mtu || st.std_mtu);
-		L2.push(this.line(_('MTU'), mtu + ' (' + (mtuAuto ? _('Default') : mtu == st.small_mtu ? _('Small') : _('Custom')) + ')'));
 		const ka = i.keepalive == null ? KEEPALIVE : i.keepalive;
-		L2.push(this.line(_('Keepalive'), ka + ' (' + (ka == KEEPALIVE ? _('Default') : ka == 0 ? _('Disabled') : _('Custom')) + ')'));
-		L2.push(this.line(_('Default route'), i.default_route ? yes : no));
-		L2.push(this.line(_('Firewall zone'), i.firewall ? i.name + (i.forward.length ? ' ← ' + i.forward.join(', ') : '') : off));
-		const ksw = i.killswitch;
-		L2.push(this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') + (ksw.wan && ksw.wan.length ? ' (' + [].concat(ksw.wan).join(', ') + ')' : '') : off));
-		const pf = i.portfwd;
-		L2.push(this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('not in this region')
+		const ksw = i.killswitch, pf = i.portfwd;
+		const L2 = [].concat(
+			this.stateLines(i),
+			this.line(_('Keepalive'), ka + ' (' + (ka == KEEPALIVE ? _('Default') : ka == 0 ? _('Disabled') : _('Custom')) + ')'),
+			i.up && i.endpoint ? this.line(_('Server IP'), i.endpoint) : [],
+			this.line(_('Default route'), i.default_route ? yes : no),
+			this.line(_('DNS'), dnsLabel(i)),
+			this.line(_('MTU'), mtu + ' (' + (mtuAuto ? _('Default') : mtu == st.small_mtu ? _('Small') : _('Custom')) + ')'),
+			this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') + (ksw.wan && ksw.wan.length ? ' (' + [].concat(ksw.wan).join(', ') + ')' : '') : off),
+			this.line(_('Firewall zone'), i.firewall ? i.name + (i.forward.length ? ' ← ' + i.forward.join(', ') : '') : off),
+			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('not in this region')
 				: !pf.port ? _('waiting for a port')
-				: String(pf.port) + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off));
-		L2.push(this.line(_('Bring up on boot'), i.boot ? (i.boot_delay ? _('Yes (after %d s)').format(i.boot_delay) : yes) : no));
-		this.stateLines(i).forEach(l => L2.push(l));
-		if (i.dip) L2.push(this.line(_('Dedicated IP'), yes));
+				: String(pf.port) + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
+			this.line(_('Bring up on boot'), i.boot ? (i.boot_delay ? _('Yes (after %d s)').format(i.boot_delay) : yes) : no),
+			i.dip ? this.line(_('Dedicated IP'), yes) : []);
 		if (i.mss && !i.mss.clamp) warn.push('⚠ ' + _('no MSS clamping'));
 		if (ksw && ksw.leaks && ksw.leaks.length)
 			ksw.leaks.forEach(l => warn.push('⚠ ' + _('%s can reach %s without the VPN').format(l.split('>')[0], l.split('>')[1])));
@@ -390,7 +391,7 @@ return view.extend({
 					E('div', { 'style': 'margin-top:.5em' }, [
 						this.line(_('Region'), (i.region.name || i.region.id || '-') + (i.fast ? ' · ' + _('fastest of the country') : '')),
 						this.line(_('Protocol'), this.protoLabel(i))
-					].concat(i.up && i.endpoint ? [ this.line(_('Server IP'), i.endpoint) ] : [], this.settingsLines(i)))
+					].concat(this.settingsLines(i)))
 				])),
 				E('td', { 'class': 'td cbi-section-actions' }, E('div', [
 					i.up ? btn('cbi-button-action', _('Restart'), () => this.doAction(i.name, 'restart', _('Restarting %s').format(i.name)))
