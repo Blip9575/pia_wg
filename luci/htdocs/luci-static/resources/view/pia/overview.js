@@ -332,7 +332,7 @@ return view.extend({
 			return [ E('div', { 'class': 'spinning' }, _('Working…')) ];
 		if (!i.up)
 			return [ E('div', { 'style': 'opacity:.6' }, E('em', _('Interface is not running'))) ];
-		return [ this.line(_('Handshake'), ago(i.handshake) + (i.endpoint ? ' · ' + i.endpoint : '')) ];
+		return [ this.line(_('Handshake'), ago(i.handshake)) ];
 	},
 
 	settingsLines: function(i) {
@@ -343,6 +343,7 @@ return view.extend({
 		L2.push(this.line(_('Route'), i.default_route ? _('default route') : _('no default route')));
 		if (i.firewall)
 			L2.push(this.line(_('Firewall zone'), i.name + (i.forward.length ? ' ← ' + i.forward.join(', ') : '')));
+		this.stateLines(i).forEach(l => L2.push(l));
 		const ksw = i.killswitch;
 		if (ksw && ksw.enabled) L2.push(this.line(_('Kill switch'), _('on')));
 		const pf = i.portfwd;
@@ -390,7 +391,7 @@ return view.extend({
 					E('div', { 'style': 'margin-top:.5em' }, [
 						this.line(_('Region'), (i.region.name || i.region.id || '-') + (i.fast ? ' · ' + _('fastest of the country') : '')),
 						this.line(_('Protocol'), this.protoLabel(i))
-					].concat(this.stateLines(i), this.settingsLines(i)))
+					].concat(i.up && i.endpoint ? [ this.line(_('Server IP'), i.endpoint) ] : [], this.settingsLines(i)))
 				])),
 				E('td', { 'class': 'td cbi-section-actions' }, E('div', [
 					i.up ? btn('cbi-button-action', _('Restart'), () => this.doAction(i.name, 'restart', _('Restarting %s').format(i.name)))
