@@ -347,7 +347,7 @@ return view.extend({
 			this.line(_('DNS'), dnsLabel(i)),
 			this.line(_('MTU'), mtu + ' (' + (mtuAuto ? _('Default') : mtu == st.small_mtu ? _('Small') : _('Custom')) + ')'),
 			this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') + (ksw.wan && ksw.wan.length ? ' (' + [].concat(ksw.wan).join(', ') + ')' : '') : off),
-			this.line(_('Firewall zone'), i.firewall ? i.name + (i.forward.length ? ' ← ' + i.forward.join(', ') : '') : off),
+			this.line(_('Firewall zone'), i.firewall ? (i.forward.length ? i.forward.join(', ') + ' → ' : '') + i.name : off),
 			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('not in this region')
 				: !pf.port ? _('waiting for a port')
 				: String(pf.port) + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
@@ -384,8 +384,8 @@ return view.extend({
 				'style': 'background:linear-gradient(' + md + ',' + lo + ') !important;border-bottom-color:' + hi + ';color:' + v(sc[1]) + ';text-shadow:none' }, E('strong', i.name)),
 			E('div', { 'class': 'ifacebox-body' }, [
 				E('small', { 'style': 'color:' + hi },
-					up ? '● ' + _('Connected') + (i.handshake != null ? ' · ' + _('handshake %s').format(ago(i.handshake)) : '')
-						: working ? _('Working…') : '○ ' + _('Stopped'))
+					up ? (i.handshake != null ? _('Handshake %s').format(ago(i.handshake)) : _('Not connected'))
+						: working ? _('Working…') : _('Stopped'))
 			])
 		]);
 	},
