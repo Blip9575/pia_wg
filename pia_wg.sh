@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.15.1
+# Version: 1.16.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -3623,7 +3623,8 @@ confirm_cmd() {
     echo "$CCW The interface is down" >&3
     return 0
   }
-  confirm_done && {
+  # (--check: after a change of the WAN, where a recent handshake proves nothing)
+  [ "$1" = '--check' ] || ! confirm_done || {
     echo "$CCW The interface is up" >&3
     return 0
   }
@@ -3765,7 +3766,7 @@ hook_content() {
 # done by a second process (this file with 'run'), in the background, because
 # the hotplug events are handled one at a time.
 if [ "\$1" != run ]; then
-  [ "\$ACTION" = ifup ] || exit 0
+  case "\$ACTION" in ifup | ifdown | ifupdate) ;; *) exit 0 ;; esac
   /bin/sh '$HOOKFILE' run "\$ACTION" "\$INTERFACE" >/dev/null 2>&1 &
   exit 0
 fi
@@ -3886,9 +3887,58 @@ boot_delay_run() {
   done
 }
 
+# A WAN changed (gateway, address, or it went away): the route to each server is
+# moved to the best WAN, the tunnel gets a keepalive at once (a handshake does not
+# come by itself on a live session) and, when the DNS server does not answer
+# through it within 10 seconds, the confirmation and its recovery run. Nothing
+# happens when the route to the server did not change.
+wan_changed() {
+  iface_exists "$2" && return 0
+  sleep 2
+  for WX in $(iface_list); do
+    PIAWG_IF="$WX"
+    set_ifvars
+    wgt "$WX" show "$WX" >/dev/null 2>&1 || continue
+    WXE="$(session_get server_ip)"
+    [ -n "$WXE" ] || WXE="$(sget "network.$PIAWG_PEER.endpoint_host")"
+    [ -n "$WXE" ] || continue
+    WXB="$(ip -4 route show "$WXE/32" 2>/dev/null)"
+    endpoint_route "$WXE" pin
+    WXA="$(ip -4 route show "$WXE/32" 2>/dev/null)"
+    [ "$WXB" != "$WXA" ] || continue
+    echo "WAN change ($1 $2): the route to the server $WXE was '${WXB:-none}', now '${WXA:-none}'" >&3
+    history_add wan changed "$WXE" "" "" "$1 $2: server route moved to ${WXA:-none}"
+    WXK="$(uci -q get "pia.$WX.peer_persistent_keepalive")"
+    WXK="${WXK:-$PIA_KEEPALIVE}"
+    WXP="$(wgt "$WX" show "$WX" peers 2>/dev/null | head -n 1)"
+    if [ "$WXK" != '0' ] && [ -n "$WXP" ]; then
+      wgt "$WX" set "$WX" peer "$WXP" persistent-keepalive 0 2>/dev/null
+      wgt "$WX" set "$WX" peer "$WXP" persistent-keepalive "$WXK" 2>/dev/null
+    fi
+    WXT=$(date +%s)
+    WXOK=''
+    while :; do
+      tunnel_dns_probe && { WXOK=1; break; }
+      [ $(($(date +%s) - WXT)) -ge 10 ] && break
+      sleep 1
+    done
+    if [ -n "$WXOK" ]; then
+      echo "WAN change: the tunnel answers through the new route" >&3
+    else
+      echo "WAN change: the tunnel does not answer; confirming it" >&3
+      CONFIRM_BY="WAN change $2" /bin/sh "$SCRIPTPATH" -i "$WX" confirm --check
+    fi
+  done
+  return 0
+}
+
 hook_cmd() {
   case "$1" in
   ifup) ;;
+  ifdown | ifupdate)
+    wan_changed "$1" "$2"
+    return 0
+    ;;
   *) return 0 ;;
   esac
   boot_delay_run
