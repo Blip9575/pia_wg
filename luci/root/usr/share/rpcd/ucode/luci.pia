@@ -72,6 +72,23 @@ const methods = {
 		}
 	},
 
+	ping_regions: {
+		args: { proto: 'proto', ids: 'ids' },
+		call: function(request) {
+			let proto = request.args.proto == 'wireguard' ? 'wireguard' : 'amneziawg';
+			let ids = filter(split(request.args.ids ?? '', ' '), (x) => match(x, /^[a-z0-9_-]{1,40}$/));
+			if (!length(ids))
+				return {};
+			let cmd = PIA + ' api ping-regions ' + proto;
+			for (let x in ids)
+				cmd += ' ' + shellquote(x);
+			let p = popen(cmd + ' 2>/dev/null');
+			let out = p ? p.read('all') : '';
+			if (p) p.close();
+			return json(trim(out ?? '')) ?? {};
+		}
+	},
+
 	account: {
 		args: { id: 'id', password: 'password', path: 'path' },
 		call: function(request) {
@@ -128,14 +145,14 @@ const methods = {
 		args: {
 			name: 'name', proto: 'proto', region: 'region', fast: 'fast', dns: 'dns',
 			dns_ip: 'dns_ip', mtu: 'mtu', keepalive: 'keepalive', route: 'route',
-			firewall: 'firewall', forward: 'forward', killswitch: 'killswitch', ks_wan: 'ks_wan', portfwd: 'portfwd', pf_ip: 'pf_ip', pf_port: 'pf_port', strict: 'strict', boot: 'boot', boot_delay: 'boot_delay', failover: 'failover'
+			firewall: 'firewall', forward: 'forward', dns_redirect: 'dns_redirect', killswitch: 'killswitch', ks_wan: 'ks_wan', portfwd: 'portfwd', pf_ip: 'pf_ip', pf_port: 'pf_port', strict: 'strict', boot: 'boot', boot_delay: 'boot_delay', failover: 'failover'
 		},
 		call: function(request) {
 			let a = request.args;
 			if (!okname(a.name))
 				return { ok: false, error: 'Invalid interface name' };
 			let args = [ 'api', 'iface-save', a.name ];
-			for (let k in [ 'proto', 'region', 'fast', 'dns', 'dns_ip', 'mtu', 'keepalive', 'route', 'firewall', 'forward', 'killswitch', 'ks_wan', 'portfwd', 'pf_ip', 'pf_port', 'strict', 'boot', 'boot_delay', 'failover' ])
+			for (let k in [ 'proto', 'region', 'fast', 'dns', 'dns_ip', 'mtu', 'keepalive', 'route', 'firewall', 'forward', 'dns_redirect', 'killswitch', 'ks_wan', 'portfwd', 'pf_ip', 'pf_port', 'strict', 'boot', 'boot_delay', 'failover' ])
 				if (a[k] != null)
 					push(args, k + '=' + a[k]);
 			return run(args);

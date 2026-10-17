@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.16.0
+# Version: 1.17.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1631,6 +1631,113 @@ ks_sync() {
   fw_reload
 }
 
+# DNS leak redirect: the DNS queries of the networks of the zones forwarding into the
+# interface (port 53, to any server but the router) go to the router's own address on
+# that network, and DNS over TLS (port 853) is rejected. The rules carry the tag
+# pia_managed_dns=<interface>. $1 = off: none wanted. Sets FWCHANGED (no commit).
+dns_fw_inner() {
+  DNW=''
+  if [ "$1" != 'off' ] && [ "$(uci -q get "pia.$PIAWG_IF.dns_redirect")" = '1' ] &&
+    [ "$(uci -q get "pia.$PIAWG_IF.fw_zone")" = '1' ]; then
+    for DNZ in $(uci -q get "pia.$PIAWG_IF.fw_forward"); do
+      DNID="$(fw_zone_id "$DNZ")"
+      [ -n "$DNID" ] || continue
+      DNW="$DNW
+D|PIA DoT $PIAWG_IF $DNZ|$DNZ||"
+      for DNN in $(uci -q get "firewall.$DNID.network"); do
+        DNST="$(ubus call "network.interface.$DNN" status 2>/dev/null)"
+        DNIP="$(echo "$DNST" | jsonfilter -e '@["ipv4-address"][0].address')"
+        DNMK="$(echo "$DNST" | jsonfilter -e '@["ipv4-address"][0].mask')"
+        { [ -n "$DNIP" ] && [ "${DNMK:-32}" -lt 31 ]; } || continue
+        DNNET="$(ipcalc.sh "$DNIP/$DNMK" 2>/dev/null | sed -n 's/^NETWORK=//p')"
+        [ -n "$DNNET" ] || continue
+        DNW="$DNW
+R|PIA DNS $PIAWG_IF $DNN|$DNZ|$DNIP|$DNNET/$DNMK"
+      done
+    done
+  fi
+  DNHAVE='
+'
+  for DNK in redirect rule; do
+    DNC=0
+    while uci -q get "firewall.@$DNK[$DNC]" >/dev/null; do DNC=$((DNC + 1)); done
+    DNI=$((DNC - 1))
+    while [ "$DNI" -ge 0 ]; do
+      DNS="firewall.@$DNK[$DNI]"
+      if [ "$(uci -q get "$DNS.pia_managed_dns")" = "$PIAWG_IF" ]; then
+        if [ "$DNK" = 'redirect' ]; then
+          DNL="R|$(uci -q get "$DNS.name")|$(uci -q get "$DNS.src")|$(uci -q get "$DNS.dest_ip")|$(uci -q get "$DNS.src_ip")"
+        else
+          DNL="D|$(uci -q get "$DNS.name")|$(uci -q get "$DNS.src")||"
+        fi
+        case "$DNHAVE" in
+        *"
+$DNL
+"*) DNL='' ;;
+        esac
+        if [ -n "$DNL" ] && echo "$DNW" | grep -qxF "$DNL"; then
+          DNHAVE="$DNHAVE$DNL
+"
+        else
+          uci -q delete "$DNS"
+          FWCHANGED=1
+        fi
+      fi
+      DNI=$((DNI - 1))
+    done
+  done
+  echo "$DNW" | while IFS='|' read -r DNT DNNAME DNZ DNIP DNCIDR; do
+    [ -n "$DNT" ] || continue
+    case "$DNHAVE" in
+    *"
+$DNT|$DNNAME|$DNZ|$DNIP|$DNCIDR
+"*) continue ;;
+    esac
+    echo "$DNT|$DNNAME|$DNZ|$DNIP|$DNCIDR"
+  done >"$RUNDIR/dnsfw.$$.add"
+  while IFS='|' read -r DNT DNNAME DNZ DNIP DNCIDR; do
+    if [ "$DNT" = 'R' ]; then
+      DNR="$(uci -q add firewall redirect)"
+      uci -q set "firewall.$DNR.name=$DNNAME"
+      uci -q set "firewall.$DNR.src=$DNZ"
+      uci -q set "firewall.$DNR.src_ip=$DNCIDR"
+      uci -q set "firewall.$DNR.src_dip=!$DNIP"
+      uci -q set "firewall.$DNR.src_dport=53"
+      uci -q set "firewall.$DNR.dest_ip=$DNIP"
+      uci -q set "firewall.$DNR.dest_port=53"
+      uci -q add_list "firewall.$DNR.proto=tcp"
+      uci -q add_list "firewall.$DNR.proto=udp"
+      uci -q set "firewall.$DNR.target=DNAT"
+      uci -q set "firewall.$DNR.family=ipv4"
+    else
+      DNR="$(uci -q add firewall rule)"
+      uci -q set "firewall.$DNR.name=$DNNAME"
+      uci -q set "firewall.$DNR.src=$DNZ"
+      uci -q set "firewall.$DNR.dest=*"
+      uci -q set "firewall.$DNR.dest_port=853"
+      uci -q add_list "firewall.$DNR.proto=tcp"
+      uci -q add_list "firewall.$DNR.proto=udp"
+      uci -q set "firewall.$DNR.target=REJECT"
+    fi
+    uci -q set "firewall.$DNR.pia_managed_dns=$PIAWG_IF"
+    FWCHANGED=1
+  done <"$RUNDIR/dnsfw.$$.add"
+  rm -f "$RUNDIR/dnsfw.$$.add"
+  return 0
+}
+
+dns_fw_wrap() {
+  FWCHANGED=''
+  dns_fw_inner "$1"
+  [ -z "$FWCHANGED" ] || uci -q commit firewall
+  return 0
+}
+
+dns_fw_sync() {
+  persist_run dns_fw_wrap "$1"
+  fw_reload
+}
+
 # Make firewall.* what pia.<if>.fw_zone / fw_forward say (compare, then write).
 # Run through persist_run: sets FWCHANGED.
 fw_apply_inner() {
@@ -1692,14 +1799,18 @@ fw_apply_inner() {
     uci -q set "firewall.$FWF.pia_managed=1"
     FWCHANGED=1
   done
+  dns_fw_inner
   [ -z "$FWCHANGED" ] || uci -q commit firewall
   return 0
 }
 
 # Remove the zone and the forwardings we made for the interface being handled
 fw_remove_inner() {
-  pf_fw_inner ''
+  FWCHANGED=''
+  dns_fw_inner off
   PFRM="$FWCHANGED"
+  pf_fw_inner ''
+  PFRM="$PFRM$FWCHANGED"
   ks_sync_inner off
   PFRM="$PFRM$FWCHANGED"
   FWCHANGED=''
@@ -1767,6 +1878,11 @@ ask_firewall() {
   uci -q set "pia.$PIAWG_IF.fw_zone=1"
   uci -q delete "pia.$PIAWG_IF.fw_forward"
   for AFZ in $AFANS; do uci -q add_list "pia.$PIAWG_IF.fw_forward=$AFZ"; done
+  if read_yn "Send the DNS of those networks to this router and reject DNS over TLS (port 853)" y; then
+    uci -q set "pia.$PIAWG_IF.dns_redirect=1"
+  else
+    uci -q set "pia.$PIAWG_IF.dns_redirect=0"
+  fi
   uci -q commit pia
   fw_apply
 }
@@ -4230,6 +4346,7 @@ api_iface_json() {
     --argjson route "$AIDR" \
     --arg fw "$(uci -q get "pia.$PIAWG_IF.fw_zone")" \
     --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
+    --arg dnsr "$(uci -q get "pia.$PIAWG_IF.dns_redirect")" \
     --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
     --arg boot "$(uci -q get "pia.$PIAWG_IF.iface_auto")" \
     --arg bdelay "$(uci -q get "pia.$PIAWG_IF.boot_delay")" \
@@ -4256,7 +4373,7 @@ api_iface_json() {
       dns: (if $custom == 1 then "custom" elif $mace == 1 then "mace" else "standard" end), dns_ip: $dnsip,
       streaming: ($rdns | contains("-so.")),
       mtu: ($mtu | tonumber? // null), mtu_auto: ($mtuauto == "1"), mtu_run: ($mturun | tonumber? // null), keepalive: ($keep | tonumber? // null), default_route: ($route == 1),
-      firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))),
+      firewall: ($fw == "1"), forward: ($fwd | split(" ") | map(select(. != ""))), dns_redirect: (if $dnsr == "" then null else $dnsr == "1" end),
       dip: ($dip != ""), boot: ($boot == "1"), boot_delay: ($bdelay | tonumber? // 0),
       mss: {zone: $msszone, clamp: $mssok},
       killswitch: {enabled: ($kse == "1"), wan: ($ksb | split(" ") | map(select(. != ""))), leaks: ($ksl | split(" ") | map(select(. != "")))},
@@ -4324,6 +4441,32 @@ api_regions() {
       streaming: ((.name | contains("Streaming")) or (.dns | contains("-so."))),
       legacy: (($g == "wg") and (($l | split(" ")) | index($i) != null))}] | sort_by(.name)' \
     "$ASERV" 2>/dev/null || api_fail "The servers list is unreadable"
+}
+
+# api_ping_regions <wireguard|amneziawg> <id>…: the ping time (ms, from the WAN) of the
+# first server of each region, as {"id": ms or null}; nothing is stored
+api_ping_regions() {
+  case "$1" in
+  amneziawg) APG='awg' ;;
+  *) APG='wg' ;;
+  esac
+  shift
+  [ -s "$(cache_dir)/servers.json" ] || api_fail "No servers list: refresh it first"
+  pia_wan
+  APN=0
+  APPIDS=''
+  for APR in "$@"; do
+    case "$APR" in *[!a-z0-9_-]*) continue ;; esac
+    APIP="$(jq -r --arg r "$APR" --arg g "$APG" '.regions[] | select(.id == $r) | .servers[$g][0].ip // empty' "$(cache_dir)/servers.json" 2>/dev/null)"
+    [ -n "$APIP" ] || continue
+    APN=$((APN + 1))
+    (ping -c 2 -W 1 ${WANDEV:+-I "$WANDEV"} "$APIP" 2>/dev/null | awk -F/ -v id="$APR" '/^round-trip/{printf "%s %d\n", id, $4 + 0.5}' >"$RUNDIR/ping.$$.$APN") &
+    APPIDS="$APPIDS $!"
+  done
+  # shellcheck disable=SC2086
+  [ -z "$APPIDS" ] || wait $APPIDS
+  cat "$RUNDIR"/ping.$$.* 2>/dev/null | jq -Rsc 'split("\n") | map(select(. != "") | split(" ") | {(.[0]): (.[1] | tonumber)}) | add // {}'
+  rm -f "$RUNDIR"/ping.$$.*
 }
 
 # api_account: the user id on the first line of the input, the password on the second
@@ -4416,12 +4559,13 @@ api_job() {
 #   keepalive=default|off|<1-65535>  route=yes|no  firewall=yes|no
 #   killswitch=yes|no  ks_wan="<zones>" (the WAN zones: the forwardings from the allowed zones to these are removed; default the br-wan zone)
 #   portfwd=yes|no  pf_ip=<IPv4 behind the router>  pf_port=<port there; empty: the forwarded one>
+#   dns_redirect=yes|no (send the DNS of the allowed zones' networks to the router, reject DNS over TLS)
 #   boot=yes|no (netifd starts it at boot)  boot_delay=<0-3600 seconds after boot: the hook starts it instead>  forward="<zones>"  strict=no (leave dnsmasq strict-order alone; it otherwise follows the default route)
 api_iface_save() {
   AN="$1"
   shift
   valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
-  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET='' A_KS='' A_KSB='' A_KSSET='' A_BD='' A_BDSET='' A_FO=''
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET='' A_KS='' A_KSB='' A_KSSET='' A_BD='' A_BDSET='' A_FO='' A_DR=''
   for AKV in "$@"; do
     AV="${AKV#*=}"
     case "$AKV" in
@@ -4446,6 +4590,7 @@ api_iface_save() {
       ;;
     portfwd=*) A_PF="$AV" ;;
     failover=*) A_FO="$AV" ;;
+    dns_redirect=*) A_DR="$AV" ;;
     killswitch=*) A_KS="$AV" ;;
     ks_wan=*)
       A_KSB="$AV"
@@ -4473,6 +4618,7 @@ api_iface_save() {
   case "$A_FW" in '' | yes | no) ;; *) api_fail "Invalid firewall choice" ;; esac
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_BOOT" in '' | yes | no) ;; *) api_fail "Invalid boot choice" ;; esac
+  case "$A_DR" in '' | yes | no) ;; *) api_fail "Invalid DNS redirect choice" ;; esac
   case "$A_PF" in '' | yes | no) ;; *) api_fail "Invalid port forwarding choice" ;; esac
   case "$A_FO" in '' | yes | no) ;; *) api_fail "Invalid failover choice" ;; esac
   case "$A_BD" in
@@ -4672,6 +4818,16 @@ api_iface_save() {
     fi
     ;;
   esac
+  # DNS leak redirect and DoT block (the firewall zone is needed; a new interface has them)
+  [ -n "$A_DR" ] || [ -z "$AWNEW" ] || A_DR=yes
+  case "$A_DR" in
+  yes) uci -q set "pia.$AN.dns_redirect=1" ;;
+  no) uci -q set "pia.$AN.dns_redirect=0" ;;
+  esac
+  if [ -n "$A_DR" ] || [ "$A_FW" = 'no' ]; then
+    uci -q commit pia
+    PIAWG_IF="$AN" dns_fw_sync >&3
+  fi
   # started by netifd at boot (network auto); written to the flash only if it changes
   case "$A_BOOT" in
   yes) uci -q set "pia.$AN.iface_auto=1" ;;
@@ -4758,6 +4914,11 @@ api_cmd() {
   case "$1" in
   status) api_status ;;
   regions) api_regions "$2" ;;
+  ping-regions)
+    APSH="$2"
+    shift 2
+    api_ping_regions "$APSH" "$@"
+    ;;
   account) api_account ;;
   login) api_relogin ;;
   refresh-list)

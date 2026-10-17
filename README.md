@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.16.0 (upstream 1.0.16)
+1.17.0 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -66,6 +66,8 @@ config rule
 
 **Kill switch.** The safe layout is the one where every zone is input DROP, output ACCEPT, forward DROP, and the LAN zones forward only to VPN zones (no `LAN > WAN` forwarding): with the tunnel down the LAN then has no internet. The router's own traffic fails open on purpose (output is ACCEPT and the WAN default route remains), which the cold start needs. The interface option **Kill switch** (off by default; LuCI, or `pia.sh api iface-save NAME killswitch=yes ks_wan="eth_wan"`) makes that layout for you: it needs the firewall zone, at least one zone under **Allow forwarding from** and at least one under **WAN zones**, and it removes the `forwarding` entries from the first to the second. The WAN zones offered are the zones attached to `br-wan` (read from the network config, so a down interface is found too) or that masquerade, none of them using a VPN protocol, the `br-wan` zone being ticked by default; **Allow forwarding from** does not offer any zone attached to `br-wan` (masquerading or not), the VPN zones (`wireguard`, `amneziawg`, `openvpn` networks) or any zone that masquerades (a zone already forwarding keeps showing). It does not change any zone policy. What it removed is remembered (`ks_removed`) and put back when the switch is turned off, the zones change, or the interface is removed. It is applied when the interface is saved, never by the hook or the guard, so a forwarding added by hand later is not removed until the next save; `pia.sh status` and the Interfaces table warn (`LAN can reach eth_wan without the VPN`) whenever a zone that forwards into the interface can still reach a WAN zone, whether the switch is on or not.
 
+**DNS redirect.** The interface option **DNS redirect** (on for new interfaces; LuCI, or `pia.sh api iface-save NAME dns_redirect=yes|no`) stops devices bypassing the router's DNS (and so the strict DNS that follows the VPN) with a resolver of their own such as 8.8.8.8. For every zone under **Allow forwarding from**, each network of the zone gets a firewall redirect (`PIA DNS NAME NETWORK`) that sends port 53 (TCP and UDP) from that network, to any address but the router's, to the router's own address on that network; and a rule (`PIA DoT NAME ZONE`) rejects port 853 (DNS over TLS) from the zone, so DoT clients fall back to ordinary DNS. DNS over HTTPS can't be told apart from other HTTPS traffic and is not blocked. The rules are tagged `pia_managed_dns`, follow the checkbox, the zone selection and the removal of the interface, and are made for IPv4 only (PIA has no IPv6). They are written when the interface is saved or its firewall is applied: interfaces that existed before 1.17.0 have none until saved, where the box shows ticked. A router address that changes needs a save (or `pia.sh firewall`) to be followed.
+
 Neither the guard nor `renew` is a kill switch: when the tunnel is down, the default route into it disappears and traffic follows the next default route. If the LAN must never reach the internet except through PIA, make that a firewall rule rather than a routing one: the LAN zone must have **no** forwarding to the WAN zone (only to the PIA zone), as in the steps above. With no tunnel the LAN then simply has no internet. The router's own traffic (this script's calls to PIA, the cache refresh) leaves through the WAN as output, which the zone rules above do not block.
 
 ## Update
@@ -94,6 +96,8 @@ Then, next time you use `./pia_wg.sh start` (if not already started, otherwise y
 
 ## Choosing a region
 `configure region` also asks `Pick the fastest region of that country at each start? (y/N)`. With yes (`region_fast`), each `start` pings (ICMP, through the WAN, in parallel) the online regions of the same country and kind (same streaming/geo/port-forward flags) and uses the fastest; the region is written to the config only when it changes. `renew` keeps the current one.
+
+In LuCI the Region Selection list shows the ping time of each region of the chosen country in brackets (`UK London (23 ms)`, `(–)` when there is no answer): measured on request through the WAN with `pia.sh api ping-regions PROTOCOL ID…`, never stored.
 
 `./pia_wg.sh configure region` lets you type a region ID, or pick from a numbered list that can be narrowed with yes/no questions. Pressing enter gives the default, which is shown in capitals, e.g. `(y/N)`:
   - `Port forward only servers? (y/N)`: only regions supporting port forwarding

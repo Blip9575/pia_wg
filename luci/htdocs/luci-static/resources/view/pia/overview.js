@@ -24,13 +24,14 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_wan: 1, boot_delay: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1, failover: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_wan: 1, boot_delay: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1, failover: 1, dns_redirect: 1 }
 });
 function callSave(args) {
 	const o = {};
 	Object.keys(args).forEach(k => { if (args[k] != null) o[k] = args[k]; });
 	return callSaveObj(o);
 }
+const callPing = rpc.declare({ object: 'luci.pia', method: 'ping_regions', params: [ 'proto', 'ids' ] });
 const callRemove = rpc.declare({ object: 'luci.pia', method: 'remove', params: [ 'name' ] });
 const callLog = rpc.declare({ object: 'luci.pia', method: 'log', params: [ 'lines' ] });
 const callHistory = rpc.declare({ object: 'luci.pia', method: 'history' });
@@ -347,6 +348,7 @@ return view.extend({
 			this.line(_('MTU'), mtuAuto ? _('Default') : mtu == st.small_mtu ? _('Small') : _('Custom')),
 			this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') : off),
 			this.line(_('Firewall zone'), i.firewall ? (i.forward.length ? i.forward.join(', ') + ' → ' : '') + i.name : off),
+			this.line(_('DNS redirect'), i.firewall && i.dns_redirect ? _('On') : off),
 			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('Not in this region')
 				: !pf.port ? _('Waiting for a port')
 				: (pf.public_ip ? pf.public_ip + ':' : '') + pf.port + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
@@ -501,7 +503,7 @@ return view.extend({
 	regionPicker: function(proto, current, fast, onchange, placeholder) {
 		let kind = proto;
 		const box = E('div');
-		const state = { region: current ? current.id : '', fast: !!fast, regions: null };
+		const state = { region: current ? current.id : '', fast: !!fast, regions: null, ping: {}, asked: {} };
 		const self = this;
 
 		const draw = () => {
@@ -533,7 +535,20 @@ return view.extend({
 			const regionSel = E('select', { 'class': 'cbi-input-select', 'change': ev => { state.region = ev.target.value; if (onchange) onchange(); } });
 			const fill = () => {
 				const items = state.country ? shown.filter(r => r.country == state.country) : [];
-				dom.content(regionSel, items.map(r => E('option', { 'value': r.id, 'selected': r.id == state.region ? '' : null }, r.name)));
+				const label = r => r.name + (r.id in state.ping ? ' (' + (state.ping[r.id] != null ? state.ping[r.id] + ' ms' : '–') + ')' : '');
+				dom.content(regionSel, items.map(r => E('option', { 'value': r.id, 'selected': r.id == state.region ? '' : null }, label(r))));
+				// the ping times of the country (from the WAN), asked once per region and protocol
+				const ask = items.filter(r => !((kind + r.id) in state.asked));
+				if (ask.length) {
+					ask.forEach(r => { state.asked[kind + r.id] = 1; });
+					callPing(kind, ask.map(r => r.id).join(' ')).then(res => {
+						ask.forEach(r => { state.ping[r.id] = res && res[r.id] != null ? res[r.id] : null; });
+						Array.from(regionSel.options).forEach(op => {
+							const r = items.find(x => x.id == op.value);
+							if (r && r.id in state.ping) op.textContent = label(r);
+						});
+					}).catch(() => {});
+				}
 				if (!items.some(r => r.id == state.region)) state.region = items.length ? items[0].id : '';
 				regionSel.value = state.region;
 				regionSel.disabled = !state.country;
@@ -637,6 +652,7 @@ return view.extend({
 		const bdInp = E('input', { 'class': 'cbi-input-text', 'type': 'number', 'min': 0, 'max': 3600, 'step': 1, 'style': 'width:7em',
 			'value': String(adding || !i.boot ? (st.hook ? 60 : 0) : (i.boot_delay || 0)) });
 		const bdBox = field(_('Delay before bring up'), bdInp, _('Seconds after the router starts; 0 brings it up as soon as the network starts. Needs the ifup hook.'));
+		const drCb = checkbox(adding || i.dns_redirect !== false);
 		const foCb = checkbox(adding ? true : !(i.failover && !i.failover.enabled));
 		const bootCb = checkbox(adding ? false : i.boot, () => { bdBox.style.display = bootCb.checked ? '' : 'none'; });
 		bdBox.style.display = !adding && i.boot ? '' : 'none';
@@ -734,6 +750,7 @@ return view.extend({
 				killswitch: ksCb.checked ? 'yes' : 'no',
 				ks_wan: ksCb.checked ? ksBoxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
 				failover: foCb.checked ? 'yes' : 'no',
+				dns_redirect: fwCb.checked ? (drCb.checked ? 'yes' : 'no') : null,
 				portfwd: pfCb.checked ? 'yes' : 'no',
 				pf_ip: pfCb.checked ? pfIp.value.trim() : null,
 				pf_port: pfCb.checked ? pfPort.value : null,
@@ -778,6 +795,7 @@ return view.extend({
 				field(_('Firewall zone'), fwCb, [ E('div', _('Recommended to create zone with NAT and MSS clamping')), fwWarn ]),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('Select internal networks permitted to route traffic via VPN.')),
+				field(_('DNS redirect'), drCb, _('Send DNS from the selected networks to this router and reject DNS over TLS (port 853)')),
 				field(_('Kill switch'), ksCb, _('Enable to isolate selected internal networks when VPN is down')),
 				ksBox,
 				field(_('Port forwarding'), pfCb, _('Enable Port forwarding')),
