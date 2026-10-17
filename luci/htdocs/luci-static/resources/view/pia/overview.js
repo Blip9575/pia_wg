@@ -364,15 +364,28 @@ return view.extend({
 		const working = i.job && i.job.state == 'running';
 		const up = i.up && !working;
 		const ka = i.keepalive == null ? KEEPALIVE : i.keepalive;
-		let colour = '#d73a49', tip = _('Stopped');
-		if (working) { colour = '#6b7280'; tip = _('Working…'); }
-		else if (up && (ka == 0 || (i.handshake != null && i.handshake <= STALE))) { colour = '#2ea44f'; tip = _('Connected'); }
-		else if (up) { colour = '#d97706'; tip = i.handshake == null ? _('No handshake yet') : _('Handshake %s: older than %d s').format(ago(i.handshake), STALE); }
-		return E('div', { 'class': 'ifacebox', 'style': 'margin:0' }, [
+		// the theme's own colours (as the buttons use), so they follow the light and dark mode
+		const scheme = { // [theme variable, on-colour variable, fallback colour, fallback on-colour]
+			green: [ 'success', 'on-success-color', '#2ea44f', '#fff' ],
+			amber: [ 'warn', 'on-warn-color', '#d97706', '#fff' ],
+			red: [ 'error', 'on-error-color', '#d73a49', '#fff' ],
+			grey: [ 'text-color', 'on-primary-color', '#6b7280', '#fff' ]
+		};
+		let kind = 'red', tip = _('Stopped');
+		if (working) { kind = 'grey'; tip = _('Working…'); }
+		else if (up && (ka == 0 || (i.handshake != null && i.handshake <= STALE))) { kind = 'green'; tip = _('Connected'); }
+		else if (up) { kind = 'amber'; tip = i.handshake == null ? _('No handshake yet') : _('Handshake %s: older than %d s').format(ago(i.handshake), STALE); }
+		const sc = scheme[kind], v = n => 'var(--' + n + ',' + (n == sc[1] ? sc[3] : sc[2]) + ')';
+		const hi = kind == 'grey' ? v('text-color-medium') : v(sc[0] + '-color-high'),
+			md = kind == 'grey' ? v('text-color-medium') : v(sc[0] + '-color-medium'),
+			lo = kind == 'grey' ? v('text-color-low') : v(sc[0] + '-color-low');
+		return E('div', { 'class': 'ifacebox', 'style': 'margin:0;border-color:' + hi }, [
 			E('div', { 'class': 'ifacebox-head', 'title': tip,
-				'style': 'background:' + colour + ' !important;color:#fff;text-shadow:none' }, E('strong', i.name)),
+				'style': 'background:linear-gradient(' + md + ',' + lo + ') !important;border-bottom-color:' + hi + ';color:' + v(sc[1]) + ';text-shadow:none' }, E('strong', i.name)),
 			E('div', { 'class': 'ifacebox-body' }, [
-				E('small', { 'style': up ? '' : 'opacity:.6' }, up ? '● ' + _('Connected') + (i.handshake != null ? ' · ' + _('handshake %s').format(ago(i.handshake)) : '') : working ? _('Working…') : '○ ' + _('Stopped'))
+				E('small', { 'style': 'color:' + hi },
+					up ? '● ' + _('Connected') + (i.handshake != null ? ' · ' + _('handshake %s').format(ago(i.handshake)) : '')
+						: working ? _('Working…') : '○ ' + _('Stopped'))
 			])
 		]);
 	},
