@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.14.2
+# Version: 1.14.3
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -4957,6 +4957,11 @@ case "$1" in
   else
     echo "Guard (cron) installed: NO"
   fi
+  CRL=$(uci -q get system.@system[0].cronloglevel)
+  case "$CRL" in
+    ''|*[!0-9]*) ;;
+    *) [ "$CRL" -lt 8 ] && echo "crond log level: $CRL (logs every job start, about 6 lines a minute with the guard; 9 logs errors only, see the README)" ;;
+  esac
   if [ "$(uci -q get "pia.$PIAWG_IF.peer_persistent_keepalive")" = '0' ]; then
     echo "Guard: off for $PIAWG_IF (the keepalive is disabled: the guard needs it to see a stale tunnel)"
   fi

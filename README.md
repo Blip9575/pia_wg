@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.14.2 (upstream 1.0.16)
+1.14.3 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -224,6 +224,8 @@ When stage 1 fails the script recovers up to three times: it registers the key a
 ## Guard (since 1.8.0)
 
 A cron job (`# pia guard`, every minute, installed with the renew job and removed with it) looks at each interface that is up. When its handshake is older than 180 seconds (a working tunnel renews it at least every 2 minutes with the keepalive on) it runs the ifup hook, which registers the key when it is missing and confirms the tunnel: a default route and DNS server that point into a dead tunnel are withdrawn first, then the recovery of the tunnel confirmation runs. The guard itself changes nothing and leaves no trace while all is well (no log file is touched). An interface whose keepalive is 0 is skipped, since an idle tunnel has no handshake then, and so is an interface that is down.
+
+The guard runs every minute, and crond itself logs each job start to the system log (about six lines a minute at log level 5, one at the busybox default 8). The script cannot change that; it is a system setting. To keep only crond's errors: `uci set system.@system[0].cronloglevel=9; uci commit system; /etc/init.d/cron restart` (`pia.sh status` shows the level when it is below 8). Every cron job on the router is affected, but only the logging.
 
 ## Logging
 When it runs unattended, the script's log is located in `/var/log/pia/pia.log` (RAM on OpenWrt, so it does not wear the flash; use `./pia_wg.sh log path` to choose another directory)
