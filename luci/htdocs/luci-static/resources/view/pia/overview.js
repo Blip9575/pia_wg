@@ -159,10 +159,10 @@ function dnsFor(st, mace, streaming) {
 	return streaming ? (mace ? d.streaming_mace : d.streaming) : (mace ? d.mace : d.standard);
 }
 
-// the name of the chosen DNS option, then the server address in brackets
+// the name of the chosen DNS option
 function dnsLabel(i) {
 	const o = DNSOPTS.find(o => o[0] == i.dns);
-	return o ? o[1] + ' (' + i.dns_ip + ')' : String(i.dns_ip);
+	return o ? o[1] : String(i.dns_ip);
 }
 
 return view.extend({
@@ -341,16 +341,16 @@ return view.extend({
 		const ksw = i.killswitch, pf = i.portfwd;
 		const L2 = [].concat(
 			this.stateLines(i),
-			this.line(_('Keepalive'), ka == KEEPALIVE ? _('Default (%d)').format(ka) : ka == 0 ? _('Disabled (0)') : _('Custom (%d)').format(ka)),
+			this.line(_('Keepalive'), ka == KEEPALIVE ? _('Default') : ka == 0 ? _('Disabled') : _('Custom')),
 			this.line(_('Default route'), i.default_route ? yes : no),
 			this.line(_('DNS'), dnsLabel(i)),
-			this.line(_('MTU'), mtuAuto ? _('Default (%d)').format(mtu) : mtu == st.small_mtu ? _('Small (%d)').format(mtu) : _('Custom (%d)').format(mtu)),
-			this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') + (ksw.wan && ksw.wan.length ? ' (' + [].concat(ksw.wan).join(', ') + ')' : '') : off),
+			this.line(_('MTU'), mtuAuto ? _('Default') : mtu == st.small_mtu ? _('Small') : _('Custom')),
+			this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') : off),
 			this.line(_('Firewall zone'), i.firewall ? (i.forward.length ? i.forward.join(', ') + ' → ' : '') + i.name : off),
 			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('not in this region')
 				: !pf.port ? _('waiting for a port')
 				: String(pf.port) + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
-			this.line(_('Bring up on boot'), i.boot ? (i.boot_delay ? _('Yes (after %d s)').format(i.boot_delay) : yes) : no),
+			this.line(_('Bring up on boot'), i.boot ? yes : no),
 			i.dip ? this.line(_('Dedicated IP'), yes) : []);
 		if (i.mss && !i.mss.clamp) warn.push('⚠ ' + _('no MSS clamping'));
 		if (ksw && ksw.leaks && ksw.leaks.length)
@@ -408,7 +408,7 @@ return view.extend({
 				E('td', { 'class': 'td', 'data-title': _('Interface') }, E('div', {}, [
 					this.ifaceBox(i),
 					E('div', { 'style': 'margin-top:.5em' }, [
-						this.line(_('Region'), (i.region.name || i.region.id || '-') + (i.fast ? ' (' + _('Fastest region') + ')' : '')),
+						this.line(_('Region'), (i.region.name || i.region.id || '-')),
 						this.line(_('Protocol'), this.protoLabel(i))
 					].concat(this.settingsLines(i)))
 				])),
@@ -598,10 +598,21 @@ return view.extend({
 			'maxlength': 15, 'placeholder': 'pia', 'spellcheck': 'false' });
 		const nameOk = n => /^[A-Za-z0-9_]{1,15}$/.test(n) && [ 'account', 'apitoken', 'vpntoken', 'cache', 'log' ].indexOf(n) < 0;
 
+		let picker = null;
 		const dnsCtl = selectHelp(DNSOPTS, adding ? 'standard' : i.dns);
 		const dnsInp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'maxlength': 15, 'size': 16, 'spellcheck': 'false',
 			'placeholder': _('IPv4 address'), 'value': !adding && i.dns == 'custom' ? i.dns_ip : '', 'style': 'margin-top:.4em' });
 		const dnsBox = withInput(dnsCtl, dnsInp);
+		// each PIA choice shows its server address in brackets (it follows a streaming optimised region)
+		const dnsLabels = () => {
+			const streaming = picker && picker.state.regions ? !!picker.get().streaming : !adding && !!i.streaming;
+			Array.from(dnsCtl.node.options).forEach(op => {
+				const o = DNSOPTS.find(x => x[0] == op.value);
+				if (o && o[0] != 'custom') op.textContent = o[1] + ' (' + dnsFor(st, o[0] == 'mace', streaming) + ')';
+			});
+		};
+		dnsCtl.node.addEventListener('focus', () => dnsLabels());
+		dnsCtl.node.addEventListener('mousedown', () => dnsLabels());
 		const cur = adding ? 0 : i.mtu;
 		const isCustom = cur && !i.mtu_auto && cur != st.std_mtu && cur != st.small_mtu;
 		const mtuCtl = selectHelp(mtuOpts(st), !cur || i.mtu_auto || cur == st.std_mtu ? 'std' : cur == st.small_mtu ? 'small' : 'custom');
@@ -650,7 +661,6 @@ return view.extend({
 		ksBox.style.display = ks.enabled ? '' : 'none';
 
 		const regionBox = E('div');
-		let picker = null;
 		const pickerProto = () => protoSel.value == 'wireguard' ? 'wireguard' : 'amneziawg';
 		if (!adding && i.dip) {
 			dom.content(regionBox, field(_('Region Selection'), E('span', i.region.name), _('Set by the dedicated IP.')));
@@ -660,6 +670,7 @@ return view.extend({
 			dom.content(regionBox, picker.node);
 			protoSel.addEventListener('change', () => picker.reload(pickerProto()));
 		}
+		dnsLabels();
 
 		const err = E('div', { 'class': 'alert-message warning', 'style': 'display:none' });
 		const problem = msg => {
