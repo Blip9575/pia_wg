@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.15.0
+# Version: 1.15.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -2914,12 +2914,12 @@ fast_region() {
   region_set "$FRID"
 }
 
-# Failover (option 'failover'): when the tunnel could not be confirmed in several
+# Failover (on unless the option 'failover' is 0): when the tunnel could not be confirmed in several
 # rounds, move to another region of the same country and kind: the fastest one
 # that was not tried in this episode. The region chosen by the user is kept
 # (region_home) and tried again by the renew job. Returns 0 when it moved.
 failover_enabled() {
-  [ "$(uci -q get "pia.$PIAWG_IF.failover")" = '1' ] && ! uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null
+  [ "$(uci -q get "pia.$PIAWG_IF.failover")" != '0' ] && ! uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null
 }
 region_failover() {
   failover_enabled || return 1
@@ -4187,7 +4187,7 @@ api_iface_json() {
     --arg kse "$(uci -q get "pia.$PIAWG_IF.ks_enable")" \
     --arg ksb "$(uci -q get "pia.$PIAWG_IF.ks_wan")" \
     --arg ksl "$(ks_leaks | tr '\n' ' ')" \
-    --arg foe "$(uci -q get "pia.$PIAWG_IF.failover")" \
+    --arg foe "$(uci -q get "pia.$PIAWG_IF.failover")" --arg fodip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
     --arg fohome "$(uci -q get "pia.$PIAWG_IF.region_home")" \
     --arg fohomename "$(jq -r --arg r "$(uci -q get "pia.$PIAWG_IF.region_home")" '.regions[] | select(.id == $r) | .name' "$(cache_dir)/servers.json" 2>/dev/null)" \
     --arg rotn "$(rot_list | grep -c .)" \
@@ -4201,7 +4201,7 @@ api_iface_json() {
     --argjson job "$(api_job_json "$PIAWG_IF")" \
     '{name: $name,
       region: {id: $rid, name: $rname, country: $rcountry},
-      failover: {enabled: ($foe == "1"), home: $fohome, home_name: $fohomename, failed_servers: ($rotn | tonumber? // 0)},
+      failover: {enabled: ($foe != "0" and $fodip == ""), home: $fohome, home_name: $fohomename, failed_servers: ($rotn | tonumber? // 0)},
       fast: ($fast == "1"), proto: $proto, auto: ($auto == 1),
       dns: (if $custom == 1 then "custom" elif $mace == 1 then "mace" else "standard" end), dns_ip: $dnsip,
       streaming: ($rdns | contains("-so.")),
@@ -4655,9 +4655,9 @@ api_iface_save() {
     ks_sync >&3
   fi
   case "$A_FO" in
-  yes) uci -q set "pia.$AN.failover=1" ;;
+  yes) uci -q delete "pia.$AN.failover" ;;
   no)
-    uci -q delete "pia.$AN.failover"
+    uci -q set "pia.$AN.failover=0"
     # back on the region chosen by the user at the next start
     FOH="$(uci -q get "pia.$AN.region_home")"
     [ -z "$FOH" ] || { PIAWG_IF="$AN" region_set "$FOH"; uci -q delete "pia.$AN.region_home"; }
@@ -5075,7 +5075,7 @@ case "$1" in
   elif [ "$(uci -q get "pia.$PIAWG_IF.ks_enable")" = '1' ]; then
     echo "Kill switch: ON (no forwarding to $(uci -q get "pia.$PIAWG_IF.ks_wan"))"
   fi
-  if [ "$(uci -q get "pia.$PIAWG_IF.failover")" = '1' ]; then
+  if failover_enabled; then
     FOH="$(uci -q get "pia.$PIAWG_IF.region_home")"
     if [ -n "$FOH" ]; then
       echo "Failover: ON, now on $(uci -q get "pia.$PIAWG_IF.region_id") (the chosen region $FOH is tried again by the renew job)"
