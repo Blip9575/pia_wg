@@ -322,41 +322,51 @@ return view.extend({
 
 	// ---- interfaces ------------------------------------------------------
 
-	stateCell: function(i) {
-		if (i.job && i.job.state == 'running')
-			return E('span', { 'class': 'spinning' }, _('Working…'));
-		if (i.up)
-			return E('span', [
-				E('strong', { 'style': 'color:#2ea44f' }, '● ' + _('Connected')),
-				E('br'),
-				E('small', _('handshake %s').format(ago(i.handshake)) + (i.endpoint ? ' · ' + i.endpoint : ''))
-			]);
-		return E('span', [ E('strong', { 'style': 'opacity:.6' }, '○ ' + _('Stopped')) ]);
+	// one labelled line of the status column
+	line: function(label, value) {
+		return E('div', [ E('strong', label + ': '), value ]);
 	},
 
-	settingsCell: function(i) {
-		const parts = [];
-		parts.push(dnsLabel(this.st, i.dns_ip));
-		parts.push(i.mtu_auto && i.mtu_run ? _('MTU %s (follows the WAN)').format(i.mtu_run) : _('MTU %s').format(i.mtu || _('default')));
-		if (i.keepalive != null && i.keepalive != KEEPALIVE) parts.push(i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive'));
-		parts.push(i.default_route ? _('default route') : _('no default route'));
-		if (i.firewall) parts.push(_('zone %s').format(i.name) + (i.forward.length ? ' ← ' + i.forward.join(', ') : ''));
-		if (i.mss && !i.mss.clamp) parts.push('⚠ ' + _('no MSS clamping'));
+	stateLines: function(i) {
+		if (i.job && i.job.state == 'running')
+			return [ E('div', { 'class': 'spinning' }, _('Working…')) ];
+		if (!i.up)
+			return [ E('div', { 'style': 'opacity:.6' }, E('em', _('Interface is not running'))) ];
+		return [ this.line(_('Handshake'), ago(i.handshake) + (i.endpoint ? ' · ' + i.endpoint : '')) ];
+	},
+
+	settingsLines: function(i) {
+		const L2 = [], warn = [];
+		L2.push(this.line(_('DNS'), dnsLabel(this.st, i.dns_ip)));
+		L2.push(this.line(_('MTU'), i.mtu_auto && i.mtu_run ? _('%s (follows the WAN)').format(i.mtu_run) : String(i.mtu || _('default'))
+			+ (i.keepalive != null && i.keepalive != KEEPALIVE ? ' · ' + (i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive')) : '')));
+		L2.push(this.line(_('Route'), i.default_route ? _('default route') : _('no default route')));
+		if (i.firewall)
+			L2.push(this.line(_('Firewall zone'), i.name + (i.forward.length ? ' ← ' + i.forward.join(', ') : '')));
 		const ksw = i.killswitch;
-		if (ksw && ksw.enabled) parts.push(_('kill switch'));
-		if (ksw && ksw.leaks && ksw.leaks.length)
-			parts.push('⚠ ' + ksw.leaks.map(l => _('%s can reach %s without the VPN').format(l.split('>')[0], l.split('>')[1])).join(', '));
+		if (ksw && ksw.enabled) L2.push(this.line(_('Kill switch'), _('on')));
 		const pf = i.portfwd;
-		if (pf && pf.enabled) {
-			if (!pf.capable)
-				parts.push(_('no port forwarding in this region'));
-			else if (!pf.port)
-				parts.push(_('port forwarding: waiting for a port'));
-			else
-				parts.push(_('port forwarding: %d').format(pf.port) + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : ''));
-		}
-		if (i.dip) parts.push(_('dedicated IP'));
-		return E('small', parts.join(' · '));
+		if (pf && pf.enabled)
+			L2.push(this.line(_('Port forwarding'), !pf.capable ? _('not in this region')
+				: !pf.port ? _('waiting for a port')
+				: String(pf.port) + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')));
+		if (i.boot) L2.push(this.line(_('Bring up on boot'), i.boot_delay ? _('after %d s').format(i.boot_delay) : _('yes')));
+		if (i.dip) L2.push(this.line(_('Dedicated IP'), _('yes')));
+		if (i.mss && !i.mss.clamp) warn.push('⚠ ' + _('no MSS clamping'));
+		if (ksw && ksw.leaks && ksw.leaks.length)
+			ksw.leaks.forEach(l => warn.push('⚠ ' + _('%s can reach %s without the VPN').format(l.split('>')[0], l.split('>')[1])));
+		return L2.concat(warn.map(w => E('div', { 'style': 'color:#d97706' }, w)));
+	},
+
+	// LuCI's interface box: shaded head with the name, badges below
+	ifaceBox: function(i) {
+		const up = i.up && !(i.job && i.job.state == 'running');
+		return E('div', { 'class': 'ifacebox' }, [
+			E('div', { 'class': 'ifacebox-head' + (up ? ' active' : '') }, E('strong', i.name)),
+			E('div', { 'class': 'ifacebox-body' }, [
+				E('small', { 'style': up ? '' : 'opacity:.6' }, up ? '● ' + _('Connected') : '○ ' + _('Stopped'))
+			])
+		]);
 	},
 
 	protoLabel: function(i) {
@@ -367,7 +377,7 @@ return view.extend({
 	renderRows: function() {
 		const list = this.st.interfaces;
 		if (!list.length)
-			return [ E('tr', { 'class': 'tr placeholder' }, [ E('td', { 'class': 'td', 'colspan': 6 },
+			return [ E('tr', { 'class': 'tr placeholder' }, [ E('td', { 'class': 'td', 'colspan': 3 },
 				E('em', _('No interface yet: use Add interface to create one.'))) ]) ];
 		return list.map(i => {
 			const busy = i.job && i.job.state == 'running';
@@ -375,14 +385,11 @@ return view.extend({
 				'class': 'cbi-button ' + cls, 'disabled': (busy || dis) ? '' : null, 'click': ui.createHandlerFn(this, fn)
 			}, label);
 			return E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td', 'data-title': _('Interface') }, E('strong', i.name)),
-				E('td', { 'class': 'td', 'data-title': _('Region') }, [
-					i.region.name || i.region.id || '-',
-					i.fast ? E('small', ' · ' + _('fastest of the country')) : ''
-				]),
-				E('td', { 'class': 'td', 'data-title': _('Protocol') }, this.protoLabel(i)),
-				E('td', { 'class': 'td', 'data-title': _('Settings') }, this.settingsCell(i)),
-				E('td', { 'class': 'td', 'data-title': _('State') }, this.stateCell(i)),
+				E('td', { 'class': 'td', 'data-title': _('Interface') }, this.ifaceBox(i)),
+				E('td', { 'class': 'td', 'data-title': _('Status') }, E('div', {}, [
+					this.line(_('Region'), (i.region.name || i.region.id || '-') + (i.fast ? ' · ' + _('fastest of the country') : '')),
+					this.line(_('Protocol'), this.protoLabel(i))
+				].concat(this.stateLines(i), this.settingsLines(i)))),
 				E('td', { 'class': 'td cbi-section-actions' }, E('div', [
 					i.up ? btn('cbi-button-action', _('Restart'), () => this.doAction(i.name, 'restart', _('Restarting %s').format(i.name)))
 						: btn('cbi-button-action', _('Start'), () => this.doAction(i.name, 'start', _('Starting %s').format(i.name))),
@@ -433,14 +440,13 @@ return view.extend({
 			E('div', { 'class': 'table cbi-section-table' }, [
 				E('table', { 'class': 'table' }, [
 					E('thead', {}, E('tr', { 'class': 'tr table-titles' }, [
-						E('th', { 'class': 'th' }, _('Interface')), E('th', { 'class': 'th' }, _('Region')),
-						E('th', { 'class': 'th' }, _('Protocol')), E('th', { 'class': 'th' }, _('Settings')),
-						E('th', { 'class': 'th' }, _('State')), E('th', { 'class': 'th cbi-section-actions' }, '')
+						E('th', { 'class': 'th' }, _('Interface')), E('th', { 'class': 'th' }, _('Status')),
+						E('th', { 'class': 'th cbi-section-actions' }, '')
 					])),
 					this.tbody
 				])
 			]),
-			E('div', { 'class': 'cbi-page-actions', 'style': 'display:flex;justify-content:flex-end;text-align:right' }, [ this.addBtn ])
+			E('div', { 'class': 'cbi-page-actions', 'style': 'text-align:left' }, [ this.addBtn ])
 		]);
 	},
 
