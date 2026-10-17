@@ -159,13 +159,10 @@ function dnsFor(st, mace, streaming) {
 	return streaming ? (mace ? d.streaming_mace : d.streaming) : (mace ? d.mace : d.standard);
 }
 
-function dnsLabel(st, ip) {
-	const d = st.dns_servers, names = {};
-	names[d.standard] = '';
-	names[d.streaming] = _('streaming');
-	names[d.mace] = _('MACE');
-	names[d.streaming_mace] = _('streaming + MACE');
-	return (names[ip] ? names[ip] + ' ' : '') + ip;
+// the DNS server address followed by the name of the chosen DNS option
+function dnsLabel(i) {
+	const o = DNSOPTS.find(o => o[0] == i.dns);
+	return i.dns_ip + (o ? ' (' + o[1] + ')' : '');
 }
 
 return view.extend({
@@ -337,7 +334,7 @@ return view.extend({
 
 	settingsLines: function(i) {
 		const L2 = [], warn = [];
-		L2.push(this.line(_('DNS'), dnsLabel(this.st, i.dns_ip)));
+		L2.push(this.line(_('DNS'), dnsLabel(i)));
 		L2.push(this.line(_('MTU'), i.mtu_auto && i.mtu_run ? String(i.mtu_run) : String(i.mtu || _('default'))
 			+ (i.keepalive != null && i.keepalive != KEEPALIVE ? ' · ' + (i.keepalive ? _('keepalive %d s').format(i.keepalive) : _('no keepalive')) : '')));
 		L2.push(this.line(_('Route'), i.default_route ? _('default route') : _('no default route')));
