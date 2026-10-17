@@ -159,10 +159,10 @@ function dnsFor(st, mace, streaming) {
 	return streaming ? (mace ? d.streaming_mace : d.streaming) : (mace ? d.mace : d.standard);
 }
 
-// the DNS server address followed by the name of the chosen DNS option
+// the name of the chosen DNS option; the address only for a custom one
 function dnsLabel(i) {
 	const o = DNSOPTS.find(o => o[0] == i.dns);
-	return i.dns_ip + (o ? ' (' + o[1] + ')' : '');
+	return o ? o[1] + (i.dns == 'custom' ? ' (' + i.dns_ip + ')' : '') : String(i.dns_ip);
 }
 
 return view.extend({
@@ -341,11 +341,10 @@ return view.extend({
 		const ksw = i.killswitch, pf = i.portfwd;
 		const L2 = [].concat(
 			this.stateLines(i),
-			this.line(_('Keepalive'), ka + ' (' + (ka == KEEPALIVE ? _('Default') : ka == 0 ? _('Disabled') : _('Custom')) + ')'),
-			i.up && i.endpoint ? this.line(_('Server IP'), i.endpoint) : [],
+			this.line(_('Keepalive'), ka == KEEPALIVE ? _('Default (%d)').format(ka) : ka == 0 ? _('Disabled (0)') : _('Custom (%d)').format(ka)),
 			this.line(_('Default route'), i.default_route ? yes : no),
 			this.line(_('DNS'), dnsLabel(i)),
-			this.line(_('MTU'), mtu + ' (' + (mtuAuto ? _('Default') : mtu == st.small_mtu ? _('Small') : _('Custom')) + ')'),
+			this.line(_('MTU'), mtuAuto ? _('Default (%d)').format(mtu) : mtu == st.small_mtu ? _('Small (%d)').format(mtu) : _('Custom (%d)').format(mtu)),
 			this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') + (ksw.wan && ksw.wan.length ? ' (' + [].concat(ksw.wan).join(', ') + ')' : '') : off),
 			this.line(_('Firewall zone'), i.firewall ? (i.forward.length ? i.forward.join(', ') + ' → ' : '') + i.name : off),
 			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('not in this region')
@@ -391,8 +390,8 @@ return view.extend({
 	},
 
 	protoLabel: function(i) {
-		const n = i.proto == 'amneziawg' ? 'AmneziaWG' : 'WireGuard';
-		return i.auto ? _('%s + automatic').format(n) : n;
+		const o = PROTOS.find(o => o[0] == (i.auto ? 'auto' : i.proto));
+		return o ? o[1] : String(i.proto);
 	},
 
 	renderRows: function() {
@@ -409,7 +408,7 @@ return view.extend({
 				E('td', { 'class': 'td', 'data-title': _('Interface') }, E('div', {}, [
 					this.ifaceBox(i),
 					E('div', { 'style': 'margin-top:.5em' }, [
-						this.line(_('Region'), (i.region.name || i.region.id || '-') + (i.fast ? ' · ' + _('fastest of the country') : '')),
+						this.line(_('Region'), (i.region.name || i.region.id || '-') + (i.fast ? ' (' + _('Fastest region') + ')' : '')),
 						this.line(_('Protocol'), this.protoLabel(i))
 					].concat(this.settingsLines(i)))
 				])),
