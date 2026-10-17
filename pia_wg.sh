@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.14.18
+# Version: 1.14.19
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -3276,6 +3276,13 @@ pf_call() {
   curl -s --max-time 10 --cacert "$(pia_ca)" --connect-to "$PFCN::$PFVIP:19999" -G "$@" "https://$PFCN:19999/$PFPATH"
 }
 
+# The address the internet sees for the tunnel (PIA's own status page, asked through
+# the tunnel as the official apps do); empty when it does not answer
+pf_exit_ip() {
+  curl -s --max-time 8 --interface "$PIAWG_IF" "https://www.privateinternetaccess.com/api/client/status" 2>/dev/null |
+    jq -r '.ip // empty' 2>/dev/null | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+}
+
 # The saved token if it is for this server and has a week left (sets PFPAY, PFSIG, PFPORT)
 pf_token_load() {
   PFTF="$(pf_tokfile)"
@@ -3433,7 +3440,9 @@ pf_run() {
     return 1
   fi
   PFOLD="$(awk '{print $1; exit}' "$PFSF" 2>/dev/null)"
-  echo "$PFPORT $(date +%s)" >"$PFSF"
+  PFXIP="$(pf_exit_ip)"
+  [ -n "$PFXIP" ] || PFXIP="$(awk '{print $3; exit}' "$PFSF" 2>/dev/null)"
+  echo "$PFPORT $(date +%s)${PFXIP:+ $PFXIP}" >"$PFSF"
   rm -f "$RUNDIR/portfwd.try.$PIAWG_IF"
   if [ "$PFOLD" != "$PFPORT" ] || [ -n "$PFNEWTOK" ]; then
     echo "Port forwarding: port $PFPORT bound on $PFCN${PFNEWTOK:+ (new token)}, token valid until $(date -d "@$PFEXP" '+%Y/%m/%d' 2>/dev/null || echo "$PFEXP")" >&3
@@ -4068,6 +4077,7 @@ api_iface_json() {
     --arg pfip "$(uci -q get "pia.$PIAWG_IF.pf_ip")" \
     --arg pfdp "$(uci -q get "pia.$PIAWG_IF.pf_port")" \
     --arg pfport "$([ "$AIUP" = true ] && awk '{print $1; exit}' "$(pf_statefile)" 2>/dev/null)" \
+    --arg pfxip "$([ "$AIUP" = true ] && awk '{print $3; exit}' "$(pf_statefile)" 2>/dev/null)" \
     --arg pfcap "$(jq -r --arg r "$(uci -q get "pia.$PIAWG_IF.region_id")" '.regions[] | select(.id == $r) | .port_forward' "$(cache_dir)/servers.json" 2>/dev/null)" \
     --argjson up "$AIUP" --arg hs "$AIHS" --arg ep "$AIEP" \
     --argjson job "$(api_job_json "$PIAWG_IF")" \
@@ -4081,7 +4091,7 @@ api_iface_json() {
       dip: ($dip != ""), boot: ($boot == "1"), boot_delay: ($bdelay | tonumber? // 0),
       mss: {zone: $msszone, clamp: $mssok},
       killswitch: {enabled: ($kse == "1"), wan: ($ksb | split(" ") | map(select(. != ""))), leaks: ($ksl | split(" ") | map(select(. != "")))},
-      portfwd: {enabled: ($pfe == "1"), ip: $pfip, dest_port: ($pfdp | tonumber? // null), port: ($pfport | tonumber? // null), capable: ($pfcap != "false")}, up: $up, handshake: ($hs | tonumber? // null),
+      portfwd: {enabled: ($pfe == "1"), ip: $pfip, dest_port: ($pfdp | tonumber? // null), port: ($pfport | tonumber? // null), public_ip: $pfxip, capable: ($pfcap != "false")}, up: $up, handshake: ($hs | tonumber? // null),
       endpoint: ($ep | if . == "" then null else . end), job: $job}'
 }
 
@@ -4939,7 +4949,7 @@ case "$1" in
     if [ -n "$PFSP" ]; then
       PFSI="$(uci -q get "pia.$PIAWG_IF.pf_ip")"
       if [ -n "$PFSI" ]; then
-        echo "Port forwarding: port $PFSP -> $PFSI:$(uci -q get "pia.$PIAWG_IF.pf_port" || echo "$PFSP")"
+        echo "Port forwarding: $(awk '{print $3 ? $3 ":" : ""; exit}' "$(pf_statefile)" 2>/dev/null)$PFSP -> $PFSI:$(uci -q get "pia.$PIAWG_IF.pf_port" || echo "$PFSP")"
       else
         echo "Port forwarding: port $PFSP (no destination IP address: not forwarded)"
       fi

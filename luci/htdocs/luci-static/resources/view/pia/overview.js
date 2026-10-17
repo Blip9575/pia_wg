@@ -347,9 +347,9 @@ return view.extend({
 			this.line(_('MTU'), mtuAuto ? _('Default') : mtu == st.small_mtu ? _('Small') : _('Custom')),
 			this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') : off),
 			this.line(_('Firewall zone'), i.firewall ? (i.forward.length ? i.forward.join(', ') + ' → ' : '') + i.name : off),
-			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('not in this region')
-				: !pf.port ? _('waiting for a port')
-				: String(pf.port) + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
+			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('Not in this region')
+				: !pf.port ? _('Waiting for a port')
+				: (pf.public_ip ? pf.public_ip + ':' : '') + pf.port + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
 			this.line(_('Bring up on boot'), i.boot ? yes : no),
 			i.dip ? this.line(_('Dedicated IP'), yes) : []);
 		if (i.mss && !i.mss.clamp) warn.push('⚠ ' + _('no MSS clamping'));
