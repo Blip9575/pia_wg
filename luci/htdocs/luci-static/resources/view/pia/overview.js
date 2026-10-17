@@ -328,7 +328,7 @@ return view.extend({
 		if (i.job && i.job.state == 'running')
 			return [ E('div', { 'class': 'spinning' }, _('Working…')) ];
 		if (!i.up)
-			return [ E('div', { 'style': 'opacity:.6' }, E('em', _('Interface is not running'))) ];
+			return [];
 		return [ this.line(_('Handshake'), ago(i.handshake)) ];
 	},
 
