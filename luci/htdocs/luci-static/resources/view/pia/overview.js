@@ -159,10 +159,10 @@ function dnsFor(st, mace, streaming) {
 	return streaming ? (mace ? d.streaming_mace : d.streaming) : (mace ? d.mace : d.standard);
 }
 
-// the name of the chosen DNS option; the address only for a custom one
+// the name of the chosen DNS option, then the server address in brackets
 function dnsLabel(i) {
 	const o = DNSOPTS.find(o => o[0] == i.dns);
-	return o ? o[1] + (i.dns == 'custom' ? ' (' + i.dns_ip + ')' : '') : String(i.dns_ip);
+	return o ? o[1] + ' (' + i.dns_ip + ')' : String(i.dns_ip);
 }
 
 return view.extend({
