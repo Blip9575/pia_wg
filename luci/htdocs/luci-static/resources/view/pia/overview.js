@@ -329,7 +329,7 @@ return view.extend({
 			return [ E('div', { 'class': 'spinning' }, _('Working…')) ];
 		if (!i.up)
 			return [];
-		return [ this.line(_('Handshake'), ago(i.handshake)) ];
+		return [];
 	},
 
 	settingsLines: function(i) {
@@ -365,7 +365,7 @@ return view.extend({
 		return E('div', { 'class': 'ifacebox', 'style': 'margin:0' }, [
 			E('div', { 'class': 'ifacebox-head' + (up ? ' active' : '') }, E('strong', i.name)),
 			E('div', { 'class': 'ifacebox-body' }, [
-				E('small', { 'style': up ? '' : 'opacity:.6' }, up ? '● ' + _('Connected') : '○ ' + _('Stopped'))
+				E('small', { 'style': up ? '' : 'opacity:.6' }, up ? '● ' + _('Connected') + ' · ' + _('handshake %s').format(ago(i.handshake)) : '○ ' + _('Stopped'))
 			])
 		]);
 	},
