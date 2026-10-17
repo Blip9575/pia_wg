@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.14.19 (upstream 1.0.16)
+1.15.0 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -224,6 +224,12 @@ When stage 1 fails the script recovers up to three times: it registers the key a
 ## Guard (since 1.8.0)
 
 A cron job (`# pia guard`, every minute, installed with the renew job and removed with it) looks at each interface that is up. When its handshake is older than 180 seconds (a working tunnel renews it at least every 2 minutes with the keepalive on) it runs the ifup hook, which registers the key when it is missing and confirms the tunnel: a default route and DNS server that point into a dead tunnel are withdrawn first, then the recovery of the tunnel confirmation runs. The guard itself changes nothing and leaves no trace while all is well (no log file is touched). An interface whose keepalive is 0 is skipped, since an idle tunnel has no handshake then, and so is an interface that is down.
+
+### Server rotation and failover
+
+Like the official apps, which step through the servers of the chosen location one after the other and never leave it, the script remembers (in RAM) the servers that failed in a recovery and does not ask them again until every server of the region had its turn. A failed round is followed by a pause that grows: 1, 2, 5 and then 10 minutes (`confirm --force` skips it).
+
+**Failover** (a checkbox under the region, off by default, not for a dedicated IP) goes one step further than the apps: when three rounds in a row could not confirm the tunnel, the interface moves to another region of the same country and kind (streaming optimised, geo-located, port forwarding): the fastest by ping that was not tried yet. The region you chose is kept (`region_home`) and the renew job (every 6 hours) goes back to it once one of its servers answers a ping. The move writes the region to `/etc/config/pia` (and again when going back), the history records both. Choosing a region in the dialog, or switching Failover off, ends the failover.
 
 The guard runs every minute, and crond itself logs each job start to the system log (about six lines a minute at log level 5, one at the busybox default 8). The script cannot change that; it is a system setting. To keep only crond's errors: `uci set system.@system[0].cronloglevel=9; uci commit system; /etc/init.d/cron restart` (`pia.sh status` shows the level when it is below 8). Every cron job on the router is affected, but only the logging.
 

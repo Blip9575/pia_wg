@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.14.19
+# Version: 1.15.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -863,8 +863,10 @@ store_region() {
     set pia.$PIAWG_IF.region_name="$PIAREGIONNAME"
     set pia.$PIAWG_IF.region_dns="$PIAREGIONDNS"
     set pia.$PIAWG_IF.region_country="$(echo "$PIAREGIONS" | jq -r ".[] | select(.id==\"$PIAREGIONID\") | .country")"
+    delete pia.$PIAWG_IF.region_home
     commit pia
 EOI
+  rm -f "$RUNDIR/failover.tried.$PIAWG_IF"
   dns_apply
 }
 
@@ -1142,7 +1144,13 @@ $(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
   [ "$PIAPROTO" = 'amneziawg' ] && KEYPATH='add-awg-key'
   # one peer per token and server: keep off the servers of the other interfaces
   SIBIPS="$(sibling_endpoints) $PIAEXCL"
-  SERVERS="$(echo "$SERVERS" | awk -v u="$SIBIPS" 'BEGIN{n=split(u,a," ");for(i=1;i<=n;i++)x[a[i]]=1} !($1 in x)')"
+  ALLSERVERS="$SERVERS"
+  SERVERS="$(echo "$ALLSERVERS" | awk -v u="$SIBIPS $(rot_list | tr '\n' ' ')" 'BEGIN{n=split(u,a," ");for(i=1;i<=n;i++)x[a[i]]=1} !($1 in x)')"
+  # every server of the region had its turn: a new round
+  if ! echo "$SERVERS" | awk '$3 == "ip" {f = 1} END {exit !f}' && [ -s "$(rot_file)" ]; then
+    rot_clear
+    SERVERS="$(echo "$ALLSERVERS" | awk -v u="$SIBIPS" 'BEGIN{n=split(u,a," ");for(i=1;i<=n;i++)x[a[i]]=1} !($1 in x)')"
+  fi
   unset ADDKEYAUTHFAIL
   ADDKEYWHY='no server to ask'
   while read -r HOST CN MODE KPORT; do
@@ -2817,24 +2825,24 @@ endpoint_route() {
   [ "$ERD" != "$PIAWG_IF" ]
 }
 
-# Fastest region of the country of the configured one: ICMP echoes from the
-# WAN (what PIA's apps measure), in parallel. The region is only written when
-# it changes.
-fast_region() {
-  [ "$(uci -q get "pia.$PIAWG_IF.region_fast")" = '1' ] || return 0
-  uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null && return 0
-  FRC="$(uci -q get "pia.$PIAWG_IF.region_country")"
-  [ -n "$FRC" ] || return 0
+# ---- servers that failed, and failover to another region ----
+# Like the official apps, which step through the servers of the chosen location
+# one after the other, the servers that failed in this recovery are remembered
+# (in RAM) and not asked again until every server of the region had its turn.
+rot_file() { echo "$RUNDIR/failed.$PIAWG_IF"; }
+rot_add() {
+  [ -n "$1" ] || return 0
+  grep -qxF "$1" "$(rot_file)" 2>/dev/null || echo "$1" >>"$(rot_file)"
+}
+rot_list() { cat "$(rot_file)" 2>/dev/null; }
+rot_clear() { rm -f "$(rot_file)"; }
+
+# Pings (ICMP from the WAN, in parallel) the regions of $FRL ("id ip" lines): sets
+# FRALL ("ms id" lines) and FRBEST (the fastest), and records them in the history
+ping_regions() {
   pia_wan
   FRN=0
   FRPIDS=''
-  # the same kind of region as the chosen one (streaming optimised, geo, port forward)
-  FRL="$(jq -r --arg c "$FRC" --arg g "$SRVGRP" --arg me "$(uci -q get "pia.$PIAWG_IF.region_id")" '
-    def kind: [((.name | contains("Streaming")) or (.dns | contains("-so."))), .geo, .port_forward];
-    (.regions[] | select(.id == $me) | kind) as $k
-    | .regions[] | select(.country == $c and .offline == false and kind == $k) | select(.servers[$g])
-    | "\(.id) \(.servers[$g][0].ip)"' "$(cache_dir)/servers.json" 2>/dev/null)"
-  [ -n "$FRL" ] || return 0
   while read -r FRID FRIP; do
     FRN=$((FRN + 1))
     (ping -c 2 -W 1 ${WANDEV:+-I "$WANDEV"} "$FRIP" 2>/dev/null | awk -F/ -v id="$FRID" '/^round-trip/{print $4, id}' >"$RUNDIR/fast.$$.$FRN") &
@@ -2856,6 +2864,46 @@ EOF
   done <<EOF
 $FRL
 EOF
+}
+
+# The regions of the same country and kind (streaming optimised, geo, port forward)
+# as the configured one that are online, as "id ip" lines; $1: ids to leave out
+region_candidates() {
+  FRC="$(uci -q get "pia.$PIAWG_IF.region_country")"
+  [ -n "$FRC" ] || return 0
+  jq -r --arg c "$FRC" --arg g "$SRVGRP" --arg me "$(uci -q get "pia.$PIAWG_IF.region_id")" --arg x "$1" '
+    def kind: [((.name | contains("Streaming")) or (.dns | contains("-so."))), .geo, .port_forward];
+    ($x | split(" ")) as $out
+    | (.regions[] | select(.id == $me) | kind) as $k
+    | .regions[] | select(.country == $c and .offline == false and kind == $k) | select(.servers[$g])
+    | select(.id as $i | $out | index($i) | not)
+    | "\(.id) \(.servers[$g][0].ip)"' "$(cache_dir)/servers.json" 2>/dev/null
+}
+
+# Make region $1 the one of the interface
+region_set() {
+  RSNAME="$(jq -r --arg r "$1" '.regions[] | select(.id == $r) | .name' "$(cache_dir)/servers.json")"
+  RSDNS="$(jq -r --arg r "$1" '.regions[] | select(.id == $r) | .dns' "$(cache_dir)/servers.json")"
+  uci -q batch <<EOI >/dev/null
+    set pia.$PIAWG_IF.region_id="$1"
+    set pia.$PIAWG_IF.region_name="$RSNAME"
+    set pia.$PIAWG_IF.region_dns="$RSDNS"
+    commit pia
+EOI
+  dns_apply
+}
+
+# Fastest region of the country of the configured one: ICMP echoes from the
+# WAN (what PIA's apps measure), in parallel. The region is only written when
+# it changes.
+fast_region() {
+  [ "$(uci -q get "pia.$PIAWG_IF.region_fast")" = '1' ] || return 0
+  uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null && return 0
+  FRC="$(uci -q get "pia.$PIAWG_IF.region_country")"
+  [ -n "$FRC" ] || return 0
+  FRL="$(region_candidates '')"
+  [ -n "$FRL" ] || return 0
+  ping_regions
   [ -n "$FRBEST" ] || {
     echo "Fastest region: no answer to the pings; keeping $(uci -q get "pia.$PIAWG_IF.region_id")" >&3
     return 0
@@ -2863,15 +2911,60 @@ EOF
   FRID="${FRBEST#* }"
   echo "Fastest region of $FRC: $FRID (${FRBEST%% *} ms)" >&3
   [ "$FRID" = "$(uci -q get "pia.$PIAWG_IF.region_id")" ] && return 0
-  FRNAME="$(jq -r --arg r "$FRID" '.regions[] | select(.id == $r) | .name' "$(cache_dir)/servers.json")"
-  FRDNS="$(jq -r --arg r "$FRID" '.regions[] | select(.id == $r) | .dns' "$(cache_dir)/servers.json")"
-  uci -q batch <<EOI >/dev/null
-    set pia.$PIAWG_IF.region_id="$FRID"
-    set pia.$PIAWG_IF.region_name="$FRNAME"
-    set pia.$PIAWG_IF.region_dns="$FRDNS"
-    commit pia
-EOI
-  dns_apply
+  region_set "$FRID"
+}
+
+# Failover (option 'failover'): when the tunnel could not be confirmed in several
+# rounds, move to another region of the same country and kind: the fastest one
+# that was not tried in this episode. The region chosen by the user is kept
+# (region_home) and tried again by the renew job. Returns 0 when it moved.
+failover_enabled() {
+  [ "$(uci -q get "pia.$PIAWG_IF.failover")" = '1' ] && ! uci -q get "pia.$PIAWG_IF.dip_token" >/dev/null
+}
+region_failover() {
+  failover_enabled || return 1
+  FOCUR="$(uci -q get "pia.$PIAWG_IF.region_id")"
+  FOT="$RUNDIR/failover.tried.$PIAWG_IF"
+  grep -qxF "$FOCUR" "$FOT" 2>/dev/null || echo "$FOCUR" >>"$FOT"
+  FRL="$(region_candidates "$(tr '\n' ' ' <"$FOT")")"
+  if [ -z "$FRL" ]; then
+    echo "Failover: no other region of $(uci -q get "pia.$PIAWG_IF.region_country") left to try" >&3
+    history_add confirm failover "" "" "" "no other region left to try"
+    rm -f "$FOT"
+    return 1
+  fi
+  ping_regions
+  if [ -n "$FRBEST" ]; then FOID="${FRBEST#* }"; else FOID="$(echo "$FRL" | awk 'NR == 1 {print $1}')"; fi
+  [ -n "$(uci -q get "pia.$PIAWG_IF.region_home")" ] || uci -q set "pia.$PIAWG_IF.region_home=$FOCUR"
+  echo "Failover: $FOCUR did not connect; moving to $FOID" >&3
+  history_add confirm failover "" "" "" "region $FOCUR did not connect: moving to $FOID" "$FOID"
+  region_set "$FOID"
+  PIAREGIONS=''
+  rot_clear
+  return 0
+}
+
+# The region chosen by the user answers again (a server answers the ping): back to it
+failover_home() {
+  FHR="$(uci -q get "pia.$PIAWG_IF.region_home")"
+  [ -n "$FHR" ] || return 1
+  [ "$FHR" != "$(uci -q get "pia.$PIAWG_IF.region_id")" ] || {
+    uci -q delete "pia.$PIAWG_IF.region_home"
+    uci -q commit pia
+    return 1
+  }
+  FRL="$(jq -r --arg r "$FHR" --arg g "$SRVGRP" '.regions[] | select(.id == $r and .offline == false) | select(.servers[$g]) | "\(.id) \(.servers[$g][0].ip)"' "$(cache_dir)/servers.json" 2>/dev/null)"
+  [ -n "$FRL" ] || return 1
+  ping_regions
+  [ -n "$FRBEST" ] || return 1
+  echo "Failover: $FHR answers again; moving back" >&3
+  history_add confirm failover "" "" "" "region $FHR answers again: moving back" "$FHR"
+  region_set "$FHR"
+  uci -q delete "pia.$PIAWG_IF.region_home"
+  uci -q commit pia
+  rm -f "$RUNDIR/failover.tried.$PIAWG_IF"
+  rot_clear
+  return 0
 }
 
 # One attempt: register a new key, bring the interface up, wait for the
@@ -2927,6 +3020,7 @@ auto_start() {
       fi
       # a server that registered us but never answered: not that one again
       PIAEXCL="$PIAEXCL $(session_get server_ip)"
+      rot_add "$(session_get server_ip)"
       ifdown "$PIAWG_IF" >/dev/null 2>&1
       [ -n "$(session_get server_ip)" ] && ip route del "$(session_get server_ip)/32" 2>/dev/null
     done
@@ -3231,6 +3325,7 @@ confirm_recover() {
     fi
     # not the server that did not answer
     PIAEXCL="$CROLDEP"
+    rot_add "$CROLDEP"
     ;;
   3)
     CRL="$(cat "$RUNDIR/last.token" 2>/dev/null)"
@@ -3242,6 +3337,7 @@ confirm_recover() {
       echo "Stage 1/2 (confirm): the VPN token was renewed less than 10 minutes ago; kept (attempt 3/3)" >&3
     fi
     PIAEXCL="$CROLDEP"
+    rot_add "$CROLDEP"
     ;;
   *) echo "Stage 1/2 (confirm): registering the key again (attempt 1/3)" >&3 ;;
   esac
@@ -3489,7 +3585,8 @@ confirm_tunnel() {
         else
           echo "Stage 2/2 (apply): DNS server $(dns_hosts | awk '{print $1}') and its route applied" >&3
         fi
-        rm -f "$RUNDIR/confirm.fail.$PIAWG_IF"
+        rm -f "$RUNDIR/confirm.fail.$PIAWG_IF" "$RUNDIR/confirm.cnt.$PIAWG_IF" "$RUNDIR/failover.tried.$PIAWG_IF"
+        rot_clear
         history_add confirm ok "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "handshake and DNS answer confirmed, routes applied"
         pf_run >&3
         return 0
@@ -3499,7 +3596,16 @@ confirm_tunnel() {
     CTA=$((CTA + 1))
     if [ $CTA -gt 3 ]; then
       date +%s >"$RUNDIR/confirm.fail.$PIAWG_IF"
-      history_add confirm failed "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "$CTWHY"
+      CTRN=$(($(cat "$RUNDIR/confirm.cnt.$PIAWG_IF" 2>/dev/null || echo 0) + 1))
+      echo "$CTRN" >"$RUNDIR/confirm.cnt.$PIAWG_IF"
+      history_add confirm failed "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "$CTWHY (round $CTRN)"
+      # the next round starts on another server
+      rot_add "$(session_get server_ip)"
+      if [ $CTRN -ge 3 ] && region_failover; then
+        rm -f "$RUNDIR/confirm.cnt.$PIAWG_IF" "$RUNDIR/confirm.fail.$PIAWG_IF"
+        CTA=0
+        continue
+      fi
       echo "Error: Stage 1/2 (confirm) FAILED after 3 attempts (last: $CTWHY): the tunnel stays unconfirmed, the WAN keeps the default route; retried at the next hook or cron" >&3
       return 1
     fi
@@ -3523,8 +3629,11 @@ confirm_cmd() {
   }
   if [ "$1" != '--force' ]; then
     CCF="$(cat "$RUNDIR/confirm.fail.$PIAWG_IF" 2>/dev/null)"
-    if [ $(($(date +%s) - ${CCF:-0})) -lt 120 ]; then
-      echo "$CCW In back-off after a failed attempt, $((120 - $(date +%s) + CCF))s left" >&3
+    # the pause grows with the rounds that failed: 1, 2, 5 and then 10 minutes
+    CCN="$(cat "$RUNDIR/confirm.cnt.$PIAWG_IF" 2>/dev/null)"
+    case "${CCN:-1}" in 1) CCB=60 ;; 2) CCB=120 ;; 3) CCB=300 ;; *) CCB=600 ;; esac
+    if [ $(($(date +%s) - ${CCF:-0})) -lt $CCB ]; then
+      echo "$CCW In back-off after a failed attempt, $((CCB - $(date +%s) + CCF))s left" >&3
       return 0
     fi
   fi
@@ -3557,6 +3666,11 @@ renew_cmd() {
     if [ -f "$RENEWFAIL" ] && [ $(($(date +%s) - $(cat "$RENEWFAIL" 2>/dev/null || echo 0))) -lt 30 ]; then
       return 0
     fi
+  fi
+  # on a failover region: the region chosen by the user answers again, go back to it
+  if [ -z "$RIFMISS" ] && failover_home; then
+    start_wgpia
+    return $?
   fi
   if [ -z "$RFORCE" ] && [ -z "$RNEWKEY" ] && HSECGE="$(handshake_age)" && [ "$HSECGE" -lt "$RENEW_SKIP" ]; then
     echo "The tunnel is up (handshake ${HSECGE}s ago): nothing to renew (use --force)"
@@ -4073,6 +4187,10 @@ api_iface_json() {
     --arg kse "$(uci -q get "pia.$PIAWG_IF.ks_enable")" \
     --arg ksb "$(uci -q get "pia.$PIAWG_IF.ks_wan")" \
     --arg ksl "$(ks_leaks | tr '\n' ' ')" \
+    --arg foe "$(uci -q get "pia.$PIAWG_IF.failover")" \
+    --arg fohome "$(uci -q get "pia.$PIAWG_IF.region_home")" \
+    --arg fohomename "$(jq -r --arg r "$(uci -q get "pia.$PIAWG_IF.region_home")" '.regions[] | select(.id == $r) | .name' "$(cache_dir)/servers.json" 2>/dev/null)" \
+    --arg rotn "$(rot_list | grep -c .)" \
     --arg pfe "$(uci -q get "pia.$PIAWG_IF.pf_enable")" \
     --arg pfip "$(uci -q get "pia.$PIAWG_IF.pf_ip")" \
     --arg pfdp "$(uci -q get "pia.$PIAWG_IF.pf_port")" \
@@ -4083,6 +4201,7 @@ api_iface_json() {
     --argjson job "$(api_job_json "$PIAWG_IF")" \
     '{name: $name,
       region: {id: $rid, name: $rname, country: $rcountry},
+      failover: {enabled: ($foe == "1"), home: $fohome, home_name: $fohomename, failed_servers: ($rotn | tonumber? // 0)},
       fast: ($fast == "1"), proto: $proto, auto: ($auto == 1),
       dns: (if $custom == 1 then "custom" elif $mace == 1 then "mace" else "standard" end), dns_ip: $dnsip,
       streaming: ($rdns | contains("-so.")),
@@ -4252,7 +4371,7 @@ api_iface_save() {
   AN="$1"
   shift
   valid_ifname "$AN" || api_fail "Invalid name: 1 to 15 letters, digits or underscore, and not one of:$RESERVED_NAMES"
-  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET='' A_KS='' A_KSB='' A_KSSET='' A_BD='' A_BDSET=''
+  A_PROTO='' A_REGION='' A_FAST='' A_DNS='' A_DNSIP='' A_MTU='' A_KEEP='' A_ROUTE='' A_FW='' A_FWD='' A_STRICT='' A_FWDSET='' A_BOOT='' A_PF='' A_PFIP='' A_PFPORT='' A_PFSET='' A_KS='' A_KSB='' A_KSSET='' A_BD='' A_BDSET='' A_FO=''
   for AKV in "$@"; do
     AV="${AKV#*=}"
     case "$AKV" in
@@ -4276,6 +4395,7 @@ api_iface_save() {
       A_BDSET=1
       ;;
     portfwd=*) A_PF="$AV" ;;
+    failover=*) A_FO="$AV" ;;
     killswitch=*) A_KS="$AV" ;;
     ks_wan=*)
       A_KSB="$AV"
@@ -4304,6 +4424,7 @@ api_iface_save() {
   case "$A_STRICT" in '' | yes | no) ;; *) api_fail "Invalid strict-order choice" ;; esac
   case "$A_BOOT" in '' | yes | no) ;; *) api_fail "Invalid boot choice" ;; esac
   case "$A_PF" in '' | yes | no) ;; *) api_fail "Invalid port forwarding choice" ;; esac
+  case "$A_FO" in '' | yes | no) ;; *) api_fail "Invalid failover choice" ;; esac
   case "$A_BD" in
   '') ;;
   *[!0-9]*) api_fail "Boot delay: digits only, 0 to 3600 seconds" ;;
@@ -4533,6 +4654,16 @@ api_iface_save() {
   if [ -n "$A_KS" ] || [ -n "$A_KSSET" ] || [ -n "$A_FWDSET" ] || [ "$A_FW" = 'no' ] || [ "$(uci -q get "pia.$AN.ks_enable")" = '1' ] || [ -n "$(uci -q get "pia.$AN.ks_removed")" ]; then
     ks_sync >&3
   fi
+  case "$A_FO" in
+  yes) uci -q set "pia.$AN.failover=1" ;;
+  no)
+    uci -q delete "pia.$AN.failover"
+    # back on the region chosen by the user at the next start
+    FOH="$(uci -q get "pia.$AN.region_home")"
+    [ -z "$FOH" ] || { PIAWG_IF="$AN" region_set "$FOH"; uci -q delete "pia.$AN.region_home"; }
+    ;;
+  esac
+  [ -z "$A_FO" ] || uci -q commit pia
   # port forwarding: the option, the destination, and the redirect at once if the tunnel is up
   if [ -n "$A_PF" ] || [ -n "$A_PFSET" ]; then
     case "$A_PF" in
@@ -4943,6 +5074,14 @@ case "$1" in
     echo "Kill switch: $([ "$(uci -q get "pia.$PIAWG_IF.ks_enable")" = '1' ] && echo 'ON, but' || echo OFF): traffic can leave without the VPN through ${KSL}(from>to)"
   elif [ "$(uci -q get "pia.$PIAWG_IF.ks_enable")" = '1' ]; then
     echo "Kill switch: ON (no forwarding to $(uci -q get "pia.$PIAWG_IF.ks_wan"))"
+  fi
+  if [ "$(uci -q get "pia.$PIAWG_IF.failover")" = '1' ]; then
+    FOH="$(uci -q get "pia.$PIAWG_IF.region_home")"
+    if [ -n "$FOH" ]; then
+      echo "Failover: ON, now on $(uci -q get "pia.$PIAWG_IF.region_id") (the chosen region $FOH is tried again by the renew job)"
+    else
+      echo "Failover: ON (another region of the same country when this one cannot connect)"
+    fi
   fi
   if pf_enabled; then
     PFSP="$(awk '{print $1; exit}' "$(pf_statefile)" 2>/dev/null)"

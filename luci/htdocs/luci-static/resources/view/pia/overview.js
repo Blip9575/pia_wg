@@ -24,7 +24,7 @@ function routeTaken(name) {
 // so they are sent as an object holding only the given ones
 const callSaveObj = rpc.declare({
 	object: 'luci.pia', method: 'save',
-	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_wan: 1, boot_delay: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1 }
+	params: { name: 1, proto: 1, region: 1, fast: 1, dns: 1, dns_ip: 1, mtu: 1, keepalive: 1, route: 1, firewall: 1, forward: 1, killswitch: 1, ks_wan: 1, boot_delay: 1, portfwd: 1, pf_ip: 1, pf_port: 1, boot: 1, failover: 1 }
 });
 function callSave(args) {
 	const o = {};
@@ -350,8 +350,11 @@ return view.extend({
 			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('Not in this region')
 				: !pf.port ? _('Waiting for a port')
 				: (pf.public_ip ? pf.public_ip + ':' : '') + pf.port + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
+			this.line(_('Failover'), i.dip ? _('Not with a dedicated IP') : (i.failover && i.failover.enabled ? _('On') : off)),
 			this.line(_('Bring up on boot'), i.boot ? yes : no),
 			i.dip ? this.line(_('Dedicated IP'), yes) : []);
+		if (i.failover && i.failover.home)
+			warn.push('⚠ ' + _('Failover: running on %s; the chosen region %s is tried again by the renew job').format(i.region.name || i.region.id, i.failover.home_name || i.failover.home));
 		if (i.mss && !i.mss.clamp) warn.push('⚠ ' + _('no MSS clamping'));
 		if (ksw && ksw.leaks && ksw.leaks.length)
 			ksw.leaks.forEach(l => warn.push('⚠ ' + _('%s can reach %s without the VPN').format(l.split('>')[0], l.split('>')[1])));
@@ -634,6 +637,7 @@ return view.extend({
 		const bdInp = E('input', { 'class': 'cbi-input-text', 'type': 'number', 'min': 0, 'max': 3600, 'step': 1, 'style': 'width:7em',
 			'value': String(adding || !i.boot ? (st.hook ? 60 : 0) : (i.boot_delay || 0)) });
 		const bdBox = field(_('Delay before bring up'), bdInp, _('Seconds after the router starts; 0 brings it up as soon as the network starts. Needs the ifup hook.'));
+		const foCb = checkbox(!adding && i.failover && i.failover.enabled);
 		const bootCb = checkbox(adding ? false : i.boot, () => { bdBox.style.display = bootCb.checked ? '' : 'none'; });
 		bdBox.style.display = !adding && i.boot ? '' : 'none';
 		const pf = adding ? {} : (i.portfwd || {});
@@ -729,6 +733,7 @@ return view.extend({
 				forward: fwCb.checked ? boxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
 				killswitch: ksCb.checked ? 'yes' : 'no',
 				ks_wan: ksCb.checked ? ksBoxes.filter(b => b[1].checked).map(b => b[0]).join(' ') : null,
+				failover: foCb.checked ? 'yes' : 'no',
 				portfwd: pfCb.checked ? 'yes' : 'no',
 				pf_ip: pfCb.checked ? pfIp.value.trim() : null,
 				pf_port: pfCb.checked ? pfPort.value : null,
@@ -765,6 +770,7 @@ return view.extend({
 			[
 				field(_('Protocol Selection'), protoSel, protoCtl.help),
 				regionBox,
+				(!adding && i.dip) ? '' : field(_('Failover'), foCb, _('Switch to another region of the same country when this one cannot connect')),
 				field(_('Packet size (MTU)'), mtuBox, mtuCtl.help),
 				field(_('Keepalive'), keepBox, keepCtl.help),
 				field(_('DNS servers'), dnsBox, dnsCtl.help),
