@@ -119,7 +119,7 @@ const DNSOPTS = [
 	[ 'custom', _('Custom'), _('Provide DNS server address') ]
 ];
 
-const MTU_MIN = 1280, MTU_MAX = 1420, KEEPALIVE = 25;
+const MTU_MIN = 1280, MTU_MAX = 1420, KEEPALIVE = 25, STALE = 180;
 const KEEPOPTS = [
 	[ 'default', _('Default (%d)').format(KEEPALIVE), _('The value of the official PIA apps.') ],
 	[ 'off', _('Disabled (0)'), _('No keepalive packets: a NAT or firewall in between may drop the idle tunnel, and the guard (which looks for a stale handshake) is switched off.') ],
@@ -361,11 +361,18 @@ return view.extend({
 
 	// LuCI's interface box: shaded head with the name, badges below
 	ifaceBox: function(i) {
-		const up = i.up && !(i.job && i.job.state == 'running');
+		const working = i.job && i.job.state == 'running';
+		const up = i.up && !working;
+		const ka = i.keepalive == null ? KEEPALIVE : i.keepalive;
+		let colour = '#d73a49', tip = _('Stopped');
+		if (working) { colour = '#6b7280'; tip = _('Working…'); }
+		else if (up && (ka == 0 || (i.handshake != null && i.handshake <= STALE))) { colour = '#2ea44f'; tip = _('Connected'); }
+		else if (up) { colour = '#d97706'; tip = i.handshake == null ? _('No handshake yet') : _('Handshake %s: older than %d s').format(ago(i.handshake), STALE); }
 		return E('div', { 'class': 'ifacebox', 'style': 'margin:0' }, [
-			E('div', { 'class': 'ifacebox-head' + (up ? ' active' : '') }, E('strong', i.name)),
+			E('div', { 'class': 'ifacebox-head', 'title': tip,
+				'style': 'background:' + colour + ' !important;color:#fff;text-shadow:none' }, E('strong', i.name)),
 			E('div', { 'class': 'ifacebox-body' }, [
-				E('small', { 'style': up ? '' : 'opacity:.6' }, up ? '● ' + _('Connected') + ' · ' + _('handshake %s').format(ago(i.handshake)) : '○ ' + _('Stopped'))
+				E('small', { 'style': up ? '' : 'opacity:.6' }, up ? '● ' + _('Connected') + (i.handshake != null ? ' · ' + _('handshake %s').format(ago(i.handshake)) : '') : working ? _('Working…') : '○ ' + _('Stopped'))
 			])
 		]);
 	},
