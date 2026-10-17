@@ -361,7 +361,7 @@ return view.extend({
 	// LuCI's interface box: shaded head with the name, badges below
 	ifaceBox: function(i) {
 		const up = i.up && !(i.job && i.job.state == 'running');
-		return E('div', { 'class': 'ifacebox' }, [
+		return E('div', { 'class': 'ifacebox', 'style': 'margin:0' }, [
 			E('div', { 'class': 'ifacebox-head' + (up ? ' active' : '') }, E('strong', i.name)),
 			E('div', { 'class': 'ifacebox-body' }, [
 				E('small', { 'style': up ? '' : 'opacity:.6' }, up ? '● ' + _('Connected') : '○ ' + _('Stopped'))
@@ -377,7 +377,7 @@ return view.extend({
 	renderRows: function() {
 		const list = this.st.interfaces;
 		if (!list.length)
-			return [ E('tr', { 'class': 'tr placeholder' }, [ E('td', { 'class': 'td', 'colspan': 3 },
+			return [ E('tr', { 'class': 'tr placeholder' }, [ E('td', { 'class': 'td', 'colspan': 2 },
 				E('em', _('No interface yet: use Add interface to create one.'))) ]) ];
 		return list.map(i => {
 			const busy = i.job && i.job.state == 'running';
@@ -385,11 +385,13 @@ return view.extend({
 				'class': 'cbi-button ' + cls, 'disabled': (busy || dis) ? '' : null, 'click': ui.createHandlerFn(this, fn)
 			}, label);
 			return E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td', 'data-title': _('Interface') }, this.ifaceBox(i)),
-				E('td', { 'class': 'td', 'data-title': _('Status') }, E('div', {}, [
-					this.line(_('Region'), (i.region.name || i.region.id || '-') + (i.fast ? ' · ' + _('fastest of the country') : '')),
-					this.line(_('Protocol'), this.protoLabel(i))
-				].concat(this.stateLines(i), this.settingsLines(i)))),
+				E('td', { 'class': 'td', 'data-title': _('Interface') }, E('div', {}, [
+					this.ifaceBox(i),
+					E('div', { 'style': 'margin-top:.5em' }, [
+						this.line(_('Region'), (i.region.name || i.region.id || '-') + (i.fast ? ' · ' + _('fastest of the country') : '')),
+						this.line(_('Protocol'), this.protoLabel(i))
+					].concat(this.stateLines(i), this.settingsLines(i)))
+				])),
 				E('td', { 'class': 'td cbi-section-actions' }, E('div', [
 					i.up ? btn('cbi-button-action', _('Restart'), () => this.doAction(i.name, 'restart', _('Restarting %s').format(i.name)))
 						: btn('cbi-button-action', _('Start'), () => this.doAction(i.name, 'start', _('Starting %s').format(i.name))),
@@ -440,7 +442,7 @@ return view.extend({
 			E('div', { 'class': 'table cbi-section-table' }, [
 				E('table', { 'class': 'table' }, [
 					E('thead', {}, E('tr', { 'class': 'tr table-titles' }, [
-						E('th', { 'class': 'th' }, _('Interface')), E('th', { 'class': 'th' }, _('Status')),
+						E('th', { 'class': 'th' }, _('Interface')),
 						E('th', { 'class': 'th cbi-section-actions' }, '')
 					])),
 					this.tbody
