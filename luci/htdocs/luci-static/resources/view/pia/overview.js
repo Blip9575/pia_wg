@@ -345,10 +345,10 @@ return view.extend({
 			this.line(_('Keepalive'), ka == KEEPALIVE ? _('Default') : ka == 0 ? _('Disabled') : _('Custom')),
 			this.line(_('Default route'), i.default_route ? yes : no),
 			this.line(_('DNS'), dnsLabel(i)),
+			this.line(_('DNS redirect'), i.firewall && i.dns_redirect ? _('On') : off),
 			this.line(_('MTU'), mtuAuto ? _('Default') : mtu == st.small_mtu ? _('Small') : _('Custom')),
 			this.line(_('Kill switch'), ksw && ksw.enabled ? _('On') : off),
 			this.line(_('Firewall zone'), i.firewall ? (i.forward.length ? i.forward.join(', ') + ' → ' : '') + i.name : off),
-			this.line(_('DNS redirect'), i.firewall && i.dns_redirect ? _('On') : off),
 			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('Not in this region')
 				: !pf.port ? _('Waiting for a port')
 				: (pf.public_ip ? pf.public_ip + ':' : '') + pf.port + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
@@ -533,12 +533,22 @@ return view.extend({
 				state.country = placeholder ? '' : cur ? cur.country : (codes.indexOf('GB') >= 0 ? 'GB' : codes[0]);
 
 			const regionSel = E('select', { 'class': 'cbi-input-select', 'change': ev => { state.region = ev.target.value; if (onchange) onchange(); } });
+			let curItems = [];
 			const fill = () => {
 				const items = state.country ? shown.filter(r => r.country == state.country) : [];
 				const label = r => r.name + (r.id in state.ping ? ' (' + (state.ping[r.id] != null ? state.ping[r.id] + ' ms' : '–') + ')' : '');
 				dom.content(regionSel, items.map(r => E('option', { 'value': r.id, 'selected': r.id == state.region ? '' : null }, label(r))));
-				// the ping times of the country (from the WAN), asked once per region and protocol
-				const ask = items.filter(r => !((kind + r.id) in state.asked));
+				curItems = items;
+				pingItems();
+				if (!items.some(r => r.id == state.region)) state.region = items.length ? items[0].id : '';
+				regionSel.value = state.region;
+				regionSel.disabled = !state.country;
+				if (onchange) onchange();
+			};
+			// the ping times of the country (from the WAN), asked once per region and protocol; not while the row is hidden
+			const pingItems = () => {
+				const items = curItems;
+				const ask = state.fast ? [] : items.filter(r => !((kind + r.id) in state.asked));
 				if (ask.length) {
 					ask.forEach(r => { state.asked[kind + r.id] = 1; });
 					callPing(kind, ask.map(r => r.id).join(' ')).then(res => {
@@ -549,10 +559,6 @@ return view.extend({
 						});
 					}).catch(() => {});
 				}
-				if (!items.some(r => r.id == state.region)) state.region = items.length ? items[0].id : '';
-				regionSel.value = state.region;
-				regionSel.disabled = !state.country;
-				if (onchange) onchange();
 			};
 			const countrySel = select((placeholder ? [ [ '', _('Select VPN location') ] ] : []).concat(
 				codes.map(c => [ c, '%s (%d)'.format(countryName(c), countries[c]) ])), state.country, ev => {
@@ -563,15 +569,21 @@ return view.extend({
 			const so = checkbox(state.so, ev => { state.so = ev.target.checked; draw(); });
 			const pf = checkbox(state.pf, ev => { state.pf = ev.target.checked; draw(); });
 			const ng = checkbox(state.ng, ev => { state.ng = ev.target.checked; draw(); });
-			const fastCb = checkbox(state.fast, ev => { state.fast = ev.target.checked; });
+			const regionRow = field(_('Region Selection'), regionSel, _('Choose region for VPN endpoint'));
+			const fastCb = checkbox(state.fast, ev => {
+				state.fast = ev.target.checked;
+				regionRow.style.display = state.fast ? 'none' : '';
+				pingItems();
+			});
+			regionRow.style.display = state.fast ? 'none' : '';
 			fill();
 			dom.content(box, [
 				field(_('Physical VPN locations only'), ng, _('Exclude virtual VPN locations')),
 				field(_('Streaming optimised only'), so, _('List streaming optimised regions only')),
 				field(_('Port forwarding only'), pf, _('List port forwarding regions only')),
 				field(_('VPN location'), countrySel, _('Location of VPN endpoint')),
-				field(_('Fastest region'), fastCb, _('Automatically choose fastest region in selected country')),
-				field(_('Region Selection'), regionSel, _('Choose region for VPN endpoint'))
+				field(_('Fastest region'), fastCb, _('Automatically choose fastest region in selected country. Overrides manual selection.')),
+				regionRow
 			]);
 		};
 
@@ -612,8 +624,39 @@ return view.extend({
 		const protoSel = protoCtl.node;
 		if (!adding && i.dip) protoSel.disabled = true;
 
-		const nameInp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': adding && !others.some(o => o.name == 'pia') ? 'pia' : '',
-			'maxlength': 15, 'placeholder': 'pia', 'spellcheck': 'false' });
+		const taken = n => others.some(o => o.name == n);
+		const nameInp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': '',
+			'maxlength': 15, 'placeholder': 'pia_gb', 'spellcheck': 'false', 'style': 'margin-top:.4em', 'input': () => { nameTouched = true; } });
+		let nameTouched = false, nameUpdate = null;
+		// pia_<country code>, numbered when taken (pia_gb_2)
+		const countryName_ = () => {
+			const c = picker && picker.state.country ? picker.state.country.toLowerCase() : '';
+			if (!c) return '';
+			let n = 'pia_' + c, k = 2;
+			while (taken(n) && k < 100) n = 'pia_' + c + '_' + (k++);
+			return n.slice(0, 15);
+		};
+		const nameSel = E('select', { 'class': 'cbi-input-select', 'change': () => nameUpdate(true) });
+		const nameBox = E('div', [ nameSel, nameInp ]);
+		nameUpdate = pick => {
+			const cn = countryName_(), prev = nameSel.value;
+			const opts = [
+				[ 'pia', taken('pia') ? _('pia (exists)') : 'pia', taken('pia') ],
+				[ 'country', cn || _('pia_xx (select a location)'), !cn ],
+				[ 'custom', _('Custom'), false ]
+			];
+			dom.content(nameSel, opts.map(o => E('option', { 'value': o[0], 'disabled': o[2] ? '' : null }, o[1])));
+			let v = prev || (taken('pia') ? 'custom' : 'pia');
+			if (nameSel.querySelector('option[value=' + v + ']').disabled) v = 'custom';
+			nameSel.value = v;
+			if (v == 'custom') {
+				nameInp.style.display = '';
+				if (!nameTouched && cn) nameInp.value = cn;
+			}
+			else
+				nameInp.style.display = 'none';
+		};
+		const chosenName = () => nameSel.value == 'pia' ? 'pia' : nameSel.value == 'country' ? countryName_() : nameInp.value.trim();
 		const nameOk = n => /^[A-Za-z0-9_]{1,15}$/.test(n) && [ 'account', 'apitoken', 'vpntoken', 'cache', 'log' ].indexOf(n) < 0;
 
 		let picker = null;
@@ -686,9 +729,10 @@ return view.extend({
 			dom.content(regionBox, field(_('Region Selection'), E('span', i.region.name), _('Set by the dedicated IP.')));
 		}
 		else {
-			picker = this.regionPicker(pickerProto(), !adding && i.region.id ? { id: i.region.id } : null, !adding && i.fast, null, adding);
+			picker = this.regionPicker(pickerProto(), !adding && i.region.id ? { id: i.region.id } : null, adding ? true : i.fast, () => { if (nameUpdate) nameUpdate(); }, adding);
 			dom.content(regionBox, picker.node);
 			protoSel.addEventListener('change', () => picker.reload(pickerProto()));
+			if (adding) nameUpdate();
 		}
 		dnsLabels();
 
@@ -700,7 +744,7 @@ return view.extend({
 
 		const save = restart => {
 			const g = picker ? picker.get() : null;
-			let name = adding ? nameInp.value.trim() : i.name;
+			let name = adding ? chosenName() : i.name;
 			if (adding) {
 				if (!nameOk(name)) return problem(_('Invalid name: 1 to 15 letters, digits or underscore'));
 				if (others.some(o => o.name == name)) return problem(_('An interface with that name exists'));
@@ -783,7 +827,7 @@ return view.extend({
 				E('button', { 'class': 'cbi-button cbi-button-positive important', 'click': ui.createHandlerFn(this, () => save(true)) }, _('Save and restart')) ];
 
 		ui.showModal(adding ? _('Add interface') : _('Settings of %s').format(i.name), [].concat(
-			adding ? [ field(_('Interface Name'), nameInp, _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')) ] : [],
+			adding ? [ field(_('Interface Name'), nameBox, _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')) ] : [],
 			[
 				field(_('Protocol Selection'), protoSel, protoCtl.help),
 				regionBox,
@@ -791,11 +835,11 @@ return view.extend({
 				field(_('Packet size (MTU)'), mtuBox, mtuCtl.help),
 				field(_('Keepalive'), keepBox, keepCtl.help),
 				field(_('DNS servers'), dnsBox, dnsCtl.help),
+				field(_('DNS redirect'), drCb, _('Send DNS from the selected networks to this router and reject DNS over TLS (port 853)')),
 				field(_('Default route'), routeCb, holder ? routeTaken(holder.name) : [ E('div', _('Recommended to send all traffic via PIA.')), E('div', _('Enables strict DNS to prevent DNS leakage')) ]),
 				field(_('Firewall zone'), fwCb, [ E('div', _('Recommended to create zone with NAT and MSS clamping')), fwWarn ]),
 				field(_('Allow forwarding from'), E('div', boxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ]))),
 					_('Select internal networks permitted to route traffic via VPN.')),
-				field(_('DNS redirect'), drCb, _('Send DNS from the selected networks to this router and reject DNS over TLS (port 853)')),
 				field(_('Kill switch'), ksCb, _('Enable to isolate selected internal networks when VPN is down')),
 				ksBox,
 				field(_('Port forwarding'), pfCb, _('Enable Port forwarding')),
