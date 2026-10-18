@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.2
+# Version: 1.17.3
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1643,7 +1643,7 @@ dns_fw_inner() {
       DNID="$(fw_zone_id "$DNZ")"
       [ -n "$DNID" ] || continue
       DNW="$DNW
-D|PIA DoT $PIAWG_IF $DNZ|$DNZ||"
+D|Block DoT from $DNZ|$DNZ||"
       for DNN in $(uci -q get "firewall.$DNID.network"); do
         DNST="$(ubus call "network.interface.$DNN" status 2>/dev/null)"
         DNIP="$(echo "$DNST" | jsonfilter -e '@["ipv4-address"][0].address')"
@@ -1652,7 +1652,7 @@ D|PIA DoT $PIAWG_IF $DNZ|$DNZ||"
         DNNET="$(ipcalc.sh "$DNIP/$DNMK" 2>/dev/null | sed -n 's/^NETWORK=//p')"
         [ -n "$DNNET" ] || continue
         DNW="$DNW
-R|PIA DNS $PIAWG_IF $DNN|$DNZ|$DNIP|$DNNET/$DNMK"
+R|Redirect DNS to PIA from $DNN|$DNZ|$DNIP|$DNNET/$DNMK"
       done
     done
   fi
