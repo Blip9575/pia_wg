@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.17.3 (upstream 1.0.16)
+1.17.4 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -251,7 +251,7 @@ Firmware upgrades and LuCI backups: `renew install` and `luci install` add the h
 
 ## Bring up on boot, with a delay
 
-**Bring up on boot** (LuCI, or `pia.sh api iface-save NAME boot=yes`) lets netifd start the tunnel as soon as the network is up. With a **Delay before bring up** above 0 (LuCI proposes 60 seconds when the hook is installed; `boot_delay=SECONDS`, 1 to 3600, counted from the router's start) netifd is told not to start it (network `auto 0`) and the ifup hook does it instead: at the first interface that comes up after a boot, the hook starts a background job per delayed interface that waits until the router has been up that long and then runs `ifup NAME` (nothing if it is already up, for example started by travelmate). The normal ifup work follows (key registration, confirmation, port forwarding). The syslog line is `Boot: NAME is brought up in Ns (D s after boot)`, and the `Boot:` summary shows `bring up on boot yes, after Ds`. A delay needs the hook (`renew install`; the API refuses a delay without it); a delay of 0 changes nothing and uses no hook.
+**Bring up on boot** (LuCI, or `pia.sh api iface-save NAME boot=yes`) lets netifd start the tunnel as soon as the network is up (on by default for a new interface). With a **Delay before bring up** above 0 (on by default for a new interface, with 60 seconds; `boot_delay=SECONDS`, 1 to 3600, counted from the router's start) netifd is told not to start it (network `auto 0`) and the ifup hook does it instead: at the first interface that comes up after a boot, the hook starts a background job per delayed interface that waits until the router has been up that long and then runs `ifup NAME` (nothing if it is already up, for example started by travelmate). The normal ifup work follows (key registration, confirmation, port forwarding). The syslog line is `Boot: NAME is brought up in Ns (D s after boot)`, and the `Boot:` summary shows `bring up on boot yes, after Ds`. A delay needs the hook (`renew install`; the API refuses a delay without it); a delay of 0 changes nothing and uses no hook.
 
 **MSS clamping and the keepalive.** TCP MSS clamping (`mtu_fix`) is a property of the firewall zone: the zone this script creates has it. If the interface is in no zone, or in a zone without it, large TCP transfers can stall on a path with a smaller MTU; `pia.sh status` says `MSS clamping: OFF (...)` and the Interfaces table shows `⚠ no MSS clamping`. A disabled keepalive (0) also switches the guard off for that interface, since the guard looks for a stale handshake; `pia.sh status` says so.
 

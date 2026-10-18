@@ -650,12 +650,12 @@ return view.extend({
 		const fwCb = checkbox(adding ? true : i.firewall, () => { fwWarn.style.display = fwCb.checked ? 'none' : ''; });
 		fwWarn.style.display = (adding || i.firewall) ? 'none' : '';
 		const bdInp = E('input', { 'class': 'cbi-input-text', 'type': 'number', 'min': 0, 'max': 3600, 'step': 1, 'style': 'width:7em',
-			'value': String(adding || !i.boot ? (st.hook ? 60 : 0) : (i.boot_delay || 0)) });
+			'value': String(adding ? 60 : !i.boot ? 0 : (i.boot_delay || 0)) });
 		const bdBox = field(_('Delay before bring up'), bdInp, _('Seconds after the router starts; 0 brings it up as soon as the network starts. Needs the ifup hook.'));
 		const drCb = checkbox(adding || i.dns_redirect !== false);
 		const foCb = checkbox(adding ? true : !(i.failover && !i.failover.enabled));
-		const bootCb = checkbox(adding ? false : i.boot, () => { bdBox.style.display = bootCb.checked ? '' : 'none'; });
-		bdBox.style.display = !adding && i.boot ? '' : 'none';
+		const bootCb = checkbox(adding ? true : i.boot, () => { bdBox.style.display = bootCb.checked ? '' : 'none'; });
+		bdBox.style.display = adding || i.boot ? '' : 'none';
 		const pf = adding ? {} : (i.portfwd || {});
 		const pfIp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'maxlength': 15, 'size': 16, 'spellcheck': 'false',
 			'placeholder': _('IPv4 address'), 'value': pf.ip || '' });

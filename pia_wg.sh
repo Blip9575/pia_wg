@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.3
+# Version: 1.17.4
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -4829,6 +4829,9 @@ api_iface_save() {
     PIAWG_IF="$AN" dns_fw_sync >&3
   fi
   # started by netifd at boot (network auto); written to the flash only if it changes
+  # a new interface comes up on boot, 60 seconds after it
+  if [ -n "$AWNEW" ] && [ -z "$A_BOOT" ]; then A_BOOT=yes; fi
+  if [ -n "$AWNEW" ] && [ "$A_BOOT" = 'yes' ] && [ -z "$A_BDSET" ]; then A_BD=60 A_BDSET=1; fi
   case "$A_BOOT" in
   yes) uci -q set "pia.$AN.iface_auto=1" ;;
   no) uci -q set "pia.$AN.iface_auto=0" ;;
