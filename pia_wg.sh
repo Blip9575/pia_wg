@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.6
+# Version: 1.17.7
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1845,6 +1845,17 @@ fw_remove_inner() {
   return 0
 }
 
+# fw4 reload leaves the (empty) chains of a zone that is gone until the next restart:
+# drop them, unless the zone still exists
+fw_chains_drop() {
+  command -v nft >/dev/null 2>&1 || return 0
+  [ -z "$(fw_zone_id "$1")" ] || return 0
+  for FCD in input output forward accept_to drop_from drop_to srcnat dstnat; do
+    nft delete chain inet fw4 "${FCD}_$1" >/dev/null 2>&1
+  done
+  return 0
+}
+
 # Reload the firewall if something changed (after fw4's own check)
 fw_reload() {
   [ -n "$FWCHANGED" ] || return 0
@@ -2066,6 +2077,7 @@ remove_iface() {
   forget_net
   persist_run fw_remove_inner
   fw_reload
+  fw_chains_drop "$PIAWG_IF"
   uci -q delete "pia.$PIAWG_IF"
   uci -q commit pia
   rm -f "$SESSION"
