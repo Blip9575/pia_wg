@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.5
+# Version: 1.17.6
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1519,9 +1519,19 @@ fw_lan_zone() {
 }
 
 # The WAN zones: attached to br-wan or masquerading, no VPN protocol (and not br-lan)
+# Does a network of the zone exist? (a zone left behind by a removed interface has none)
+fw_zone_has_net() {
+  FHZ="$(fw_zone_id "$1")"
+  for FHN in $(uci -q get "firewall.$FHZ.network"); do
+    [ "$(uci -q get "network.$FHN")" = 'interface' ] && return 0
+  done
+  return 1
+}
+
 fw_wan_zones() {
   for FWZ2 in $(fw_zone_names); do
     fw_zone_is_vpn "$FWZ2" && continue
+    fw_zone_has_net "$FWZ2" || continue
     fw_zone_devs "$FWZ2" | grep -qxF br-lan && continue
     if fw_zone_masq "$FWZ2" || fw_zone_devs "$FWZ2" | grep -qxF br-wan; then echo "$FWZ2"; fi
   done
