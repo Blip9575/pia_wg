@@ -626,7 +626,7 @@ return view.extend({
 
 		const taken = n => others.some(o => o.name == n);
 		const nameInp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': '',
-			'maxlength': 15, 'placeholder': 'pia_gb', 'spellcheck': 'false', 'style': 'margin-top:.4em', 'input': () => { nameTouched = true; } });
+			'maxlength': 15, 'placeholder': 'pia_xx', 'spellcheck': 'false', 'style': 'margin-top:.4em', 'input': () => { nameTouched = true; } });
 		let nameTouched = false, nameUpdate = null;
 		// pia_<country code>, numbered when taken (pia_gb_2)
 		const countryName_ = () => {
@@ -641,13 +641,11 @@ return view.extend({
 		nameUpdate = pick => {
 			const cn = countryName_(), prev = nameSel.value;
 			const opts = [
-				[ 'pia', taken('pia') ? _('pia (exists)') : 'pia', taken('pia') ],
-				[ 'country', cn || _('pia_xx (select a location)'), !cn ],
+				[ 'country', cn || 'pia_xx', false ],
 				[ 'custom', _('Custom'), false ]
 			];
 			dom.content(nameSel, opts.map(o => E('option', { 'value': o[0], 'disabled': o[2] ? '' : null }, o[1])));
-			let v = prev || (taken('pia') ? 'custom' : 'pia');
-			if (nameSel.querySelector('option[value=' + v + ']').disabled) v = 'custom';
+			const v = prev || 'country';
 			nameSel.value = v;
 			if (v == 'custom') {
 				nameInp.style.display = '';
@@ -656,7 +654,7 @@ return view.extend({
 			else
 				nameInp.style.display = 'none';
 		};
-		const chosenName = () => nameSel.value == 'pia' ? 'pia' : nameSel.value == 'country' ? countryName_() : nameInp.value.trim();
+		const chosenName = () => nameSel.value == 'country' ? countryName_() : nameInp.value.trim();
 		const nameOk = n => /^[A-Za-z0-9_]{1,15}$/.test(n) && [ 'account', 'apitoken', 'vpntoken', 'cache', 'log' ].indexOf(n) < 0;
 
 		let picker = null;
@@ -746,6 +744,7 @@ return view.extend({
 			const g = picker ? picker.get() : null;
 			let name = adding ? chosenName() : i.name;
 			if (adding) {
+				if (!name && nameSel.value == 'country') return problem(_('Select a VPN location'));
 				if (!nameOk(name)) return problem(_('Invalid name: 1 to 15 letters, digits or underscore'));
 				if (others.some(o => o.name == name)) return problem(_('An interface with that name exists'));
 			}
