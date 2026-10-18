@@ -883,7 +883,7 @@ return view.extend({
 				dom.content(this.histBox, E('p', { 'class': 'cbi-value-description' }, _('Nothing has been recorded yet.')));
 				return;
 			}
-			const EVENTS = { register: _('Key registration'), probe: _('Token probe'), fast: _('Fastest-region ping'), confirm: _('Tunnel confirmation'), guard: _('Guard') };
+			const EVENTS = { register: _('Key registration'), probe: _('Token probe'), fast: _('Fastest-region ping'), confirm: _('Tunnel confirmation'), guard: _('Guard'), legacy: _('Legacy token') };
 			const ms = v => (v == null) ? '–' : '%d ms'.format(v);
 			const cell = (t, v) => E('td', { 'class': 'td', 'data-title': t }, v);
 			const head = cols => E('tr', { 'class': 'tr table-titles' }, cols.map(c => E('th', { 'class': 'th' }, c)));

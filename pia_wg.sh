@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.10
+# Version: 1.17.11
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1153,6 +1153,7 @@ $(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
   fi
   unset ADDKEYAUTHFAIL
   ADDKEYWHY='no server to ask'
+  ADDKEYTRIED=0 ADDKEYREFUSED=0 ADDKEYREFCN=''
   while read -r HOST CN MODE KPORT; do
     case "$MODE" in
     'ip') CODE="$(curl -s -o "$PIARESP" -w '%{http_code} %{time_total}' --connect-timeout 5 --max-time 15 ${WANDEV:+--interface "if!$WANDEV"} --cacert "$CA" --connect-to "$CN::$HOST:$KPORT" -G "$@" --data-urlencode "pubkey=$PUB" "https://$CN:$KPORT/$KEYPATH")" ;;
@@ -1161,7 +1162,12 @@ $(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
     esac
     AKSEC="${CODE#* }"
     CODE="${CODE%% *}"
-    [ "$CODE" = '401' ] && ADDKEYAUTHFAIL=1
+    ADDKEYTRIED=$((ADDKEYTRIED + 1))
+    if [ "$CODE" = '401' ]; then
+      ADDKEYAUTHFAIL=1
+      ADDKEYREFUSED=$((ADDKEYREFUSED + 1))
+      case " $ADDKEYREFCN " in *" $CN "*) ;; *) ADDKEYREFCN="$ADDKEYREFCN $CN" ;; esac
+    fi
     PIAADDKEY="$(cat "$PIARESP")"
     AKN=$((${AKN:-0} + 1))
     if [ "$(echo "$PIAADDKEY" | jq -r '.status' 2>/dev/null)" = 'OK' ]; then
@@ -1178,7 +1184,23 @@ $(uci -q get "pia.$PIAWG_IF.region_dns") - dns $PIA_WG_PORT"
   done <<EOS
 $SERVERS
 EOS
+  # every server that refused, not only the last one
+  if [ "$ADDKEYREFUSED" -gt 1 ]; then
+    ADDKEYWHY="HTTP 401 from$(echo "$ADDKEYREFCN" | sed 's/^ //; s/ / and /g; s/^/ /')"
+    [ -z "$AKMSG" ] || ADDKEYWHY="$ADDKEYWHY: $AKMSG"
+  fi
   return 1
+}
+
+# The configured region refuses the VPN token on every server: remember it in the
+# legacy list (the cache folder, not the flash), like a legacy probe would
+legacy_learn() {
+  LLR="$(uci -q get "pia.$PIAWG_IF.region_id")"
+  [ -n "$LLR" ] || return 0
+  case " $(legacy_ids) " in *" $LLR "*) return 0 ;; esac
+  echo "$LLR" >>"$(cache_dir)/legacy.list" 2>/dev/null || return 0
+  echo "$LLR needs the legacy token: remembered" >&3
+  history_add legacy learned "" "" "" "every server refused the VPN token, the legacy token was accepted" "$LLR"
 }
 
 # Is the configured region marked in the legacy list ('cache probe')?
@@ -1205,6 +1227,20 @@ pia_addkey_any() {
   if [ "$PIAAUTH" = 'vpn' ]; then
     pia_addkey && return 0
     [ "$ADDKEYAUTHFAIL" ] || return 1
+    # Every server of the region refused the VPN token: it needs the legacy one
+    # (a random refusal does not hit all of them); try it at once
+    AKALL=''
+    if [ "$ADDKEYTRIED" -ge 2 ] && [ "$ADDKEYREFUSED" -eq "$ADDKEYTRIED" ]; then
+      AKALL=1
+      echo "PIA refused the VPN token ($ADDKEYWHY); trying the legacy token" >&3
+      PIAAUTH='legacy'
+      legacy_token_ensure
+      if pia_addkey; then
+        legacy_learn
+        return 0
+      fi
+      PIAAUTH='vpn'
+    fi
     # A refusal is often random per request (measured on uk_manchester: about 60%
     # of the requests, cold or not), so the first retry is quick; renewing the
     # token does not help then
@@ -1224,7 +1260,10 @@ pia_addkey_any() {
     PIAAUTH='legacy'
     legacy_token_ensure
   fi
-  pia_addkey && return 0
+  if pia_addkey; then
+    [ -z "$AKALL" ] || [ "$PIAAUTH" != 'legacy' ] || legacy_learn
+    return 0
+  fi
   [ "$ADDKEYAUTHFAIL" ] || return 1
   renew_piatoken
   pia_addkey

@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.17.10 (upstream 1.0.16)
+1.17.11 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -183,6 +183,8 @@ Commands:
   - `./pia_wg.sh cache probe` checks which regions need the legacy token (see below)
 
 ### Regions needing the legacy token
+
+Since 1.17.11, when every server of the region (at least two) refuses the VPN token in the first round of a start, the legacy token is tried at once (no 1, 5, 15, 30 s waits, no token renewal), and when it is accepted the region is added to the legacy list (`legacy.list` in the cache folder; the next legacy probe of its country rewrites the entries), so later starts go straight to the legacy token. If the legacy token is refused too, the previous sequence runs unchanged.
 Some PIA WireGuard servers refuse the long lived VPN token and only accept the legacy 24h token, which has to be renewed more often. In `configure region`, the regions for which every server refused the VPN token are marked `(L)`. The script uses the legacy token for them automatically, so they work, but they depend on the 24h token being renewable (the cache refresh job does it).
 
 The first time (and when the result is older than a week), `configure region` offers to check the regions; this takes a few minutes. It can also be run with `./pia_wg.sh cache probe`. The check calls `addKey` with a deliberately invalid public key, so no key is registered on the servers, and leaves through the WAN, because PIA does not accept it from inside its own tunnel. A PIA server removes the existing peer of a token before it validates a new key, even when the request then fails, so the check never asks the server the tunnel is connected to (a region is judged on its other servers, or keeps its previous result). Some servers answer differently from one request to the next; a region is marked only if its servers refuse every time. The result is a snapshot, kept with its date in `legacy.list` in the cache directory. When the configured region is in that list, connecting goes straight to the legacy token instead of first trying the VPN token and being refused.
