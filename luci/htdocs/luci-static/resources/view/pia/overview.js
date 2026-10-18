@@ -626,7 +626,7 @@ return view.extend({
 
 		const taken = n => others.some(o => o.name == n);
 		const nameInp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': '',
-			'maxlength': 15, 'placeholder': 'pia_xx', 'spellcheck': 'false', 'style': 'margin-top:.4em', 'input': () => { nameTouched = true; } });
+			'maxlength': 15, 'placeholder': 'pia_cc', 'spellcheck': 'false', 'style': 'margin-top:.4em', 'input': () => { nameTouched = true; } });
 		let nameTouched = false, nameUpdate = null;
 		// pia_<country code>, numbered when taken (pia_gb_2)
 		const countryName_ = () => {
@@ -637,11 +637,12 @@ return view.extend({
 			return n.slice(0, 15);
 		};
 		const nameSel = E('select', { 'class': 'cbi-input-select', 'change': () => nameUpdate(true) });
+		const nameHelp = E('div');
 		const nameBox = E('div', [ nameSel, nameInp ]);
 		nameUpdate = pick => {
 			const cn = countryName_(), prev = nameSel.value;
 			const opts = [
-				[ 'country', cn || 'pia_xx', false ],
+				[ 'country', cn || 'pia_cc', false ],
 				[ 'custom', _('Custom'), false ]
 			];
 			dom.content(nameSel, opts.map(o => E('option', { 'value': o[0], 'disabled': o[2] ? '' : null }, o[1])));
@@ -653,6 +654,8 @@ return view.extend({
 			}
 			else
 				nameInp.style.display = 'none';
+			dom.content(nameHelp, v == 'custom' ? _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')
+				: _('Country code automatically generated based on VPN location'));
 		};
 		const chosenName = () => nameSel.value == 'country' ? countryName_() : nameInp.value.trim();
 		const nameOk = n => /^[A-Za-z0-9_]{1,15}$/.test(n) && [ 'account', 'apitoken', 'vpntoken', 'cache', 'log' ].indexOf(n) < 0;
@@ -826,7 +829,7 @@ return view.extend({
 				E('button', { 'class': 'cbi-button cbi-button-positive important', 'click': ui.createHandlerFn(this, () => save(true)) }, _('Save and restart')) ];
 
 		ui.showModal(adding ? _('Add interface') : _('Settings of %s').format(i.name), [].concat(
-			adding ? [ field(_('Interface Name'), nameBox, _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')) ] : [],
+			adding ? [ field(_('Interface Name'), nameBox, nameHelp) ] : [],
 			[
 				field(_('Protocol Selection'), protoSel, protoCtl.help),
 				regionBox,
