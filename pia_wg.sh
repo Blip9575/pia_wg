@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.4
+# Version: 1.17.5
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1639,7 +1639,7 @@ dns_fw_inner() {
   DNW=''
   if [ "$1" != 'off' ] && [ "$(uci -q get "pia.$PIAWG_IF.dns_redirect")" = '1' ] &&
     [ "$(uci -q get "pia.$PIAWG_IF.fw_zone")" = '1' ]; then
-    for DNZ in $(uci -q get "pia.$PIAWG_IF.fw_forward"); do
+    for DNZ in $(uci -q get "pia.$PIAWG_IF.fw_forward" | tr ' ' '\n' | awk '!s[$0]++'); do
       DNID="$(fw_zone_id "$DNZ")"
       [ -n "$DNID" ] || continue
       DNW="$DNW
@@ -4345,7 +4345,7 @@ api_iface_json() {
     --argjson custom "$AICUSTOM" \
     --argjson route "$AIDR" \
     --arg fw "$(uci -q get "pia.$PIAWG_IF.fw_zone")" \
-    --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward")" \
+    --arg fwd "$(uci -q get "pia.$PIAWG_IF.fw_forward" | tr ' ' '\n' | awk '!s[$0]++' | tr '\n' ' ')" \
     --arg dnsr "$(uci -q get "pia.$PIAWG_IF.dns_redirect")" \
     --arg dip "$(uci -q get "pia.$PIAWG_IF.dip_token")" \
     --arg boot "$(uci -q get "pia.$PIAWG_IF.iface_auto")" \
@@ -4382,7 +4382,7 @@ api_iface_json() {
 }
 
 api_status() {
-  AZONES="$(uci -q show firewall | sed -n "s/^firewall\\.[^.]*\\.name='\\([^']*\\)'\$/\\1/p" | tr '\n' ' ')"
+  AZONES="$(fw_zone_names | tr '\n' ' ')"
   ACD="$(cache_dir)"
   ASERV="$ACD/servers.json"
   ASN=0
@@ -4579,7 +4579,7 @@ api_iface_save() {
     route=*) A_ROUTE="$AV" ;;
     firewall=*) A_FW="$AV" ;;
     forward=*)
-      A_FWD="$AV"
+      A_FWD="$(echo "$AV" | tr ' ' '\n' | awk 'NF && !s[$0]++' | tr '\n' ' ')"
       A_FWDSET=1
       ;;
     strict=*) A_STRICT="$AV" ;;
