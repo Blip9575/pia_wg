@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.0
+# Version: 1.17.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -4845,7 +4845,9 @@ api_iface_save() {
     NETCHANGED='' SESSCHANGED=''
     ensure_iface
   fi
-  # kill switch
+  # kill switch: on for a new interface when there is a zone to isolate and a WAN zone
+  if [ -z "$A_KS" ] && [ -n "$AWNEW" ] && [ "$(uci -q get "pia.$AN.fw_zone")" = '1' ] &&
+    [ -n "$(uci -q get "pia.$AN.fw_forward")" ] && [ -n "$(fw_wan_default)" ]; then A_KS=yes; fi
   case "$A_KS" in
   yes) uci -q set "pia.$AN.ks_enable=1" ;;
   no) uci -q delete "pia.$AN.ks_enable" ;;

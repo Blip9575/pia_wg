@@ -352,7 +352,6 @@ return view.extend({
 			this.line(_('Port forwarding'), pf && pf.enabled ? (!pf.capable ? _('Not in this region')
 				: !pf.port ? _('Waiting for a port')
 				: (pf.public_ip ? pf.public_ip + ':' : '') + pf.port + (pf.ip ? ' → ' + pf.ip + ':' + (pf.dest_port || pf.port) : '')) : off),
-			this.line(_('Failover'), i.dip ? _('Not with a dedicated IP') : (i.failover && i.failover.enabled ? _('On') : off)),
 			this.line(_('Bring up on boot'), i.boot ? yes : no),
 			i.dip ? this.line(_('Dedicated IP'), yes) : []);
 		if (i.failover && i.failover.home)
@@ -414,6 +413,7 @@ return view.extend({
 					this.ifaceBox(i),
 					E('div', { 'style': 'margin-top:.5em' }, [
 						this.line(_('Region'), (i.region.name || i.region.id || '-')),
+						this.line(_('Failover'), i.dip ? _('Not with a dedicated IP') : (i.failover && i.failover.enabled ? _('On') : _('Off'))),
 						this.line(_('Protocol'), this.protoLabel(i))
 					].concat(this.settingsLines(i)))
 				])),
@@ -677,8 +677,8 @@ return view.extend({
 		const ksBoxes = (st.wan_zones || []).filter(z => z != (adding ? '' : i.name)).map(z => [ z, checkbox(ksSel.indexOf(z) >= 0) ]);
 		const ksList = E('div', ksBoxes.length ? ksBoxes.map(b => E('label', { 'style': 'margin-right:1em' }, [ b[1], ' ', b[0] ])) : _('No WAN zone found (attached to br-wan or masquerading, not a VPN)'));
 		const ksBox = field(_('WAN zones'), ksList, _('Select WAN connections to be removed so to isolate selected internal networks'));
-		const ksCb = checkbox(!!ks.enabled, () => { ksBox.style.display = ksCb.checked ? '' : 'none'; });
-		ksBox.style.display = ks.enabled ? '' : 'none';
+		const ksCb = checkbox(adding ? (fwd.length > 0 && ksSel.length > 0) : !!ks.enabled, () => { ksBox.style.display = ksCb.checked ? '' : 'none'; });
+		ksBox.style.display = ksCb.checked ? '' : 'none';
 
 		const regionBox = E('div');
 		const pickerProto = () => protoSel.value == 'wireguard' ? 'wireguard' : 'amneziawg';
