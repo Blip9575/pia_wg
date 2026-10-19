@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.13
+# Version: 1.17.14
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1567,10 +1567,21 @@ fw_zone_has_net() {
   return 1
 }
 
+# Does a network of the zone use a PIA DNS address (10.0.0.241-244)? Then it is a
+# tunnel to PIA made another way (OpenVPN, protocol none), not a WAN
+fw_zone_pia_dns() {
+  FPZ="$(fw_zone_id "$1")"
+  for FPN in $(uci -q get "firewall.$FPZ.network"); do
+    uci -q get "network.$FPN.dns" | tr ' ' '\n' | grep -qE '^10\.0\.0\.24[1-4]$' && return 0
+  done
+  return 1
+}
+
 fw_wan_zones() {
   for FWZ2 in $(fw_zone_names); do
     fw_zone_is_vpn "$FWZ2" && continue
     fw_zone_has_net "$FWZ2" || continue
+    fw_zone_pia_dns "$FWZ2" && continue
     fw_zone_devs "$FWZ2" | grep -qxF br-lan && continue
     if fw_zone_masq "$FWZ2" || fw_zone_devs "$FWZ2" | grep -qxF br-wan; then echo "$FWZ2"; fi
   done
