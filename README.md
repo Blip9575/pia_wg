@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.17.12 (upstream 1.0.16)
+1.17.13 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -183,6 +183,8 @@ Commands:
   - `./pia_wg.sh cache probe` checks which regions need the legacy token (see below)
 
 Since 1.17.12, `-i NAME` may also follow the command (`pia.sh restart -i NAME`); before, it was ignored there and the command ran for every interface.
+
+The Interfaces table has three columns like Network > Interfaces: the interface box (name and handshake), the status lines, the buttons.
 
 ### Regions needing the legacy token
 
