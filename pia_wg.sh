@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.11
+# Version: 1.17.12
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -5010,6 +5010,34 @@ api_cmd() {
 # -i NAME selects the interface (-i all: every one); with a single interface
 # configured it is implicit
 SELIF=''
+# -i may also follow the command (restart -i NAME): moved to the front
+case " $* " in
+*' -i '*)
+  if [ "$1" != '-i' ]; then
+    SELN=$#
+    SELFOUND=''
+    SELSKIP=''
+    while [ "$SELN" -gt 0 ]; do
+      SELA="$1"
+      shift
+      SELN=$((SELN - 1))
+      if [ -n "$SELSKIP" ]; then
+        SELSKIP=''
+        SELFOUND="$SELA"
+      elif [ "$SELA" = '-i' ] && [ -z "$SELFOUND" ]; then
+        SELSKIP=1
+      else
+        set -- "$@" "$SELA"
+      fi
+    done
+    if [ -n "$SELSKIP" ] || [ -z "$SELFOUND" ]; then
+      echo "-i needs an interface name (or all)" >&2
+      exit 1
+    fi
+    set -- -i "$SELFOUND" "$@"
+  fi
+  ;;
+esac
 if [ "$1" = '-i' ]; then
   SELIF="$2"
   [ -n "$SELIF" ] || {
