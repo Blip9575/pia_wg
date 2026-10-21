@@ -701,7 +701,7 @@ return view.extend({
 			else
 				nameInp.style.display = 'none';
 			dom.content(nameHelp, v == 'custom' ? _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')
-				: _('Country code automatically generated based on VPN location'));
+				: _('Select naming convention for VPN interface. Country code automatically generated based on VPN location.'));
 		};
 		const chosenName = () => nameSel.value == 'custom' ? nameInp.value.trim()
 			: countryName_((NAME_PATTERNS.find(pt => pt[0] == nameSel.value) || NAME_PATTERNS[0])[1]);
