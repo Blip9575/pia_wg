@@ -264,16 +264,6 @@ return view.extend({
 				? (days => days == 1 ? _('(1 day)') : _('(%d days)').format(days))(Math.floor((acc.vpn_expires - st.now) / 86400))
 				: _('(expired: log in again)'));
 
-		// green when this is the newest version on GitHub, amber when a newer one exists
-		let versionStatus = E('span', _('%s (not checked)').format(st.version));
-		if (st.version_latest) {
-			const older = cmpVersion(st.version, st.version_latest) < 0;
-			versionStatus = E('span', {
-				'style': 'color:var(--' + (older ? 'warn' : 'success') + '-color-high,' + (older ? '#d97706' : '#2ea44f') + ')',
-				'title': st.version_checked ? _('Checked %s UTC').format(utcDate(st.version_checked) + ' ' + utcTime(st.version_checked)) : ''
-			}, older ? _('%s → %s available').format(st.version, st.version_latest) : _('%s (up to date)').format(st.version));
-		}
-
 		const cacheLine = c.regions
 			? '%s (%d regions · %d meta servers)'.format(when ? utcDate(when) + ' ' + utcTime(when) + ' UTC' : _('never'), c.regions, c.meta || 0)
 			: _('No servers list yet');
@@ -334,8 +324,50 @@ return view.extend({
 			row('', E('button', {
 					'class': 'cbi-button cbi-button-action',
 					'click': ui.createHandlerFn(this, () => this.runJob(_('Refreshing the server list & VPN token'), '_global', () => callGlobal('refresh_cache')))
-				}, _('Refresh server list & VPN token'))),
-			row(_('Version Status'), versionStatus)
+				}, _('Refresh server list & VPN token')))
+		]);
+	},
+
+	// ---- version ---------------------------------------------------------
+
+	versionSig: function() {
+		return [ this.st.version, this.st.version_latest, this.st.version_checked ].join('|');
+	},
+
+	// green when this is the newest version on GitHub, amber when a newer one exists; Update now installs it
+	renderVersion: function() {
+		const st = this.st;
+		const older = !!st.version_latest && cmpVersion(st.version, st.version_latest) < 0;
+		let status = E('span', _('%s (not checked)').format(st.version));
+		if (st.version_latest)
+			status = E('span', {
+				'style': 'color:var(--' + (older ? 'warn' : 'success') + '-color-high,' + (older ? '#d97706' : '#2ea44f') + ')',
+				'title': st.version_checked ? _('Checked %s UTC').format(utcDate(st.version_checked) + ' ' + utcTime(st.version_checked)) : ''
+			}, older ? _('%s → %s available').format(st.version, st.version_latest) : _('%s (up to date)').format(st.version));
+		const row = (title, ...content) => E('div', { 'class': 'cbi-value' }, [ E('label', { 'class': 'cbi-value-title' }, title),
+			E('div', { 'class': 'cbi-value-field' }, content) ]);
+		const update = () => {
+			ui.showModal(_('Update now'), [
+				E('p', _('Update pia.sh from %s to %s? The LuCI app is updated too and the page reloads. No interface is restarted.').format(st.version, st.version_latest)),
+				E('div', { 'class': 'right' }, [
+					E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')), ' ',
+					E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, () => {
+						ui.hideModal();
+						return this.runJob(_('Updating pia.sh'), '_global', () => callGlobal('update'), ok => {
+							if (!ok) return false;
+							ui.showModal(_('Updating pia.sh'), [
+								E('p', _('Updated. Reload the page to use the new version.')),
+								E('div', { 'class': 'right' }, [ E('button', { 'class': 'cbi-button cbi-button-action', 'click': () => window.location.reload() }, _('Reload')) ])
+							]);
+							return true;
+						});
+					}) }, _('Update now'))
+				])
+			]);
+		};
+		return E('div', { 'class': 'cbi-section' }, [
+			row(_('Version Status'), status),
+			row('', E('button', { 'class': 'cbi-button cbi-button-action', 'disabled': older ? null : '', 'click': ui.createHandlerFn(this, update) }, _('Update now')))
 		]);
 	},
 
@@ -514,6 +546,10 @@ return view.extend({
 		if (this.accountBox && sig != this.accSig) {
 			this.accSig = sig;
 			dom.content(this.accountBox, this.renderAccount());
+		}
+		if (this.versionBox && this.versionSig() != this.verSig) {
+			this.verSig = this.versionSig();
+			dom.content(this.versionBox, this.renderVersion());
 		}
 	},
 
@@ -954,9 +990,12 @@ return view.extend({
 		const a = st.account, c = st.cache || {};
 		this.accSig = [ a.id, a.password_set, a.vpn_expires, c.regions, c.checked, c.updated, c.meta, c.ram, c.cron, c.path ].join('|');
 		this.accountBox = E('div', {}, [ this.renderAccount() ]);
+		this.verSig = this.versionSig();
+		this.versionBox = E('div', {}, [ this.renderVersion() ]);
 		const page = E('div', {}, [
 			E('h2', _('PIA VPN')),
 			E('div', { 'class': 'cbi-map-descr' }, _('Private Internet Access over WireGuard and AmneziaWG.')),
+			this.versionBox,
 			this.accountBox,
 			this.renderInterfaces(),
 			this.renderLog(),

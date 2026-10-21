@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.18.0
+# Version: 1.19.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -4226,13 +4226,29 @@ script_update() {
     exit
   }
   NEWVERS="$(awk '(index($0,"# Version: ")==1){print $3; exit}' "$TMPDL")"
-  read_yn "Version $NEWVERS is available (current: $CURVERS); install" n || {
-    rm "$TMPDL"
-    exit
-  }
+  if [ "$1" != '--yes' ]; then
+    read_yn "Version $NEWVERS is available (current: $CURVERS); install" n || {
+      rm "$TMPDL"
+      exit
+    }
+  fi
   echo "Upgrading from version $CURVERS to version $NEWVERS"
+  # the old script is kept in the cache folder (one copy) to go back by hand
+  cp -p "$SCRIPTPATH" "$(cache_dir)/pia.sh.prev" 2>/dev/null && echo "The previous script is kept as $(cache_dir)/pia.sh.prev"
+  chmod +x "$TMPDL"
   mv "$TMPDL" "$SCRIPTPATH"
   chmod +x "$SCRIPTPATH"
+  if [ "$1" = '--yes' ]; then
+    # the new script finishes the job: the LuCI app (if installed) and the jobs
+    if [ -f /www/luci-static/resources/view/pia/overview.js ]; then
+      /bin/sh "$SCRIPTPATH" luci install || {
+        echo "The LuCI app was not updated!" >&2
+        exit 1
+      }
+    fi
+    renew_installed && /bin/sh "$SCRIPTPATH" renew install
+    echo "The script is now version $(awk '(index($0,"# Version: ")==1){print $3; exit}' "$SCRIPTPATH")"
+  fi
   echo "Done"
 }
 
@@ -4243,9 +4259,10 @@ root/usr/share/luci/menu.d/luci-app-pia.json:/usr/share/luci/menu.d/luci-app-pia
 root/usr/share/rpcd/acl.d/luci-app-pia.json:/usr/share/rpcd/acl.d/luci-app-pia.json
 root/usr/share/rpcd/ucode/luci.pia:/usr/share/rpcd/ucode/luci.pia'
 
+# rpcd is restarted (LuCI users are logged out) only when $1 says so: its plugin or ACL changed
 luci_reload() {
   rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache 2>/dev/null
-  /etc/init.d/rpcd restart >/dev/null 2>&1
+  [ "$1" = 'norpcd' ] || /etc/init.d/rpcd restart >/dev/null 2>&1
 }
 
 # Install the web interface: from the luci/ directory next to the script if
@@ -4292,17 +4309,22 @@ luci_install() {
     fi
   done
   LIN=0
+  LIRPCD='norpcd'
   for LIX in $LUCI_FILES; do
     LIN=$((LIN + 1))
     LIDST="${LIX#*:}"
     mkdir -p "${LIDST%/*}"
-    sed "s|/usr/bin/pia.sh|$SCRIPTPATH|g" "$LITMP/$LIN" >"$LIDST"
+    sed "s|/usr/bin/pia.sh|$SCRIPTPATH|g" "$LITMP/$LIN" >"$LITMP/new"
+    case "$LIDST" in
+    /usr/share/rpcd/*) cmp -s "$LITMP/new" "$LIDST" || LIRPCD='' ;;
+    esac
+    cp "$LITMP/new" "$LIDST"
   done
   rm -rf "$LITMP"
   backup_add luci
-  luci_reload
+  luci_reload "$LIRPCD"
   jobs_deploy
-  echo "LuCI app installed: Services > PIA VPN (log in to LuCI again)"
+  echo "LuCI app installed: Services > PIA VPN${LIRPCD:+ (log in to LuCI again)}"
 }
 
 luci_remove() {
@@ -4625,7 +4647,7 @@ api_job() {
   *) valid_ifname "$AJK" || api_fail "Invalid interface name" ;;
   esac
   case "$*" in
-  "-i $AJK start" | "-i $AJK restart" | "-i $AJK stop" | "-i $AJK renew --force" | 'cache refresh' | 'api refresh-list' | 'api login') ;;
+  "-i $AJK start" | "-i $AJK restart" | "-i $AJK stop" | "-i $AJK renew --force" | 'cache refresh' | 'api refresh-list' | 'api login' | 'update --yes') ;;
   'cache probe '[A-Z][A-Z]) [ "$AJK" = '_probe' ] || api_fail "Command not allowed" ;;
   *) api_fail "Command not allowed" ;;
   esac
@@ -5477,7 +5499,7 @@ case "$1" in
     exit 1
     ;;
   esac ;;
-'update') script_update ;;
+'update') script_update "$2" ;;
 'version') echo "Version is ${CURVERS}" ;;
 '') print_usage ;;
 *)

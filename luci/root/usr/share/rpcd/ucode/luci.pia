@@ -113,14 +113,15 @@ const methods = {
 		}
 	},
 
-	// login | refresh_list | refresh_cache (a background job)
+	// login | refresh_list | refresh_cache | update (a background job)
 	global_action: {
 		args: { op: 'op' },
 		call: function(request) {
 			let cmd = {
 				login: [ 'api', 'login' ],
 				refresh_list: [ 'api', 'refresh-list' ],
-				refresh_cache: [ 'cache', 'refresh' ]
+				refresh_cache: [ 'cache', 'refresh' ],
+				update: [ 'update', '--yes' ]
 			}[request.args.op];
 			if (!cmd)
 				return { ok: false, error: 'Unknown action' };
