@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.19.1
+# Version: 1.19.2
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -3424,6 +3424,68 @@ time_gate() {
 #   that reads it (dqm's IoT DNS hook, trm...) see them as they always did.
 # Nothing of it is written to the flash, and a restarted interface starts again
 # from stage 1 (its ifup runs the hook, which confirms again).
+# ---- DNS routes ----
+# The PIA DNS addresses are the same on every tunnel (10.0.0.242 for Standard DNS),
+# so a host route to one must belong to ONE tunnel. dns_live IF ADDR: netifd has
+# ADDR as a DNS server of IF (stage 2 done, not withdrawn).
+dns_live() {
+  ubus call "network.interface.$1" status 2>/dev/null | jsonfilter -e '@["dns-server"][*]' | grep -qxF "$2"
+}
+
+# dns_owner ADDR [IF]: the interface whose tunnel carries the route to the DNS server ADDR:
+# the only live one that uses it; of several the one with the default route, else the
+# first in the config. IF counts as live (its stage 2 is being applied).
+dns_owner() {
+  DOFIRST=''
+  DODEF=''
+  for DOI in $(iface_list); do
+    (
+      PIAWG_IF="$DOI"
+      dns_hosts
+    ) | tr ' ' '\n' | grep -qxF "$1" || continue
+    [ "$DOI" = "$2" ] || dns_live "$DOI" "$1" || continue
+    DOFIRST="${DOFIRST:-$DOI}"
+    if [ -z "$DODEF" ] && uci -q get "pia.$DOI.peer_allowed_ips" | grep -q '0\.0\.0\.0/0'; then DODEF="$DOI"; fi
+  done
+  echo "${DODEF:-$DOFIRST}"
+}
+
+# dns_routes_sync: every live PIA tunnel carries the routes to the DNS servers it owns and
+# none that another owns (routes that were applied by netifd are redone by an update; the
+# metric 0 host route of an old stage-1 probe is removed). Nothing is written to flash.
+dns_routes_sync() {
+  DSSAVE="$PIAWG_IF"
+  for DSI in $(iface_list); do
+    PIAWG_IF="$DSI"
+    set_ifvars
+    DSLIVE=''
+    DSDIFF=''
+    for DSA in $(dns_hosts); do
+      dns_live "$DSI" "$DSA" || continue
+      DSLIVE=1
+      ip route del "$DSA/32" dev "$DSI" proto boot 2>/dev/null
+      DSHAVE=''
+      ip -4 route show "$DSA/32" dev "$DSI" proto static 2>/dev/null | grep -q . && DSHAVE=1
+      DSWANT=''
+      [ "$(dns_owner "$DSA")" = "$DSI" ] && DSWANT=1
+      [ "$DSHAVE" = "$DSWANT" ] || DSDIFF="$DSDIFF $DSA"
+    done
+    if [ -n "$DSLIVE" ]; then
+      # host routes to PIA addresses left by an older stage-1 probe (not netifd's: proto boot)
+      for DSA in $(ip -4 route show dev "$DSI" proto boot 2>/dev/null | awk '$1 ~ /^10\.0\.0\.[0-9]+$/ {print $1}'); do
+        ip route del "$DSA/32" dev "$DSI" proto boot 2>/dev/null
+      done
+    fi
+    if [ -n "$DSLIVE" ] && [ -n "$DSDIFF" ]; then
+      echo "DNS route:$DSDIFF changed on $DSI (a DNS address belongs to one tunnel: the one with the default route)" >&3
+      tunnel_update
+    fi
+  done
+  PIAWG_IF="$DSSAVE"
+  set_ifvars
+  return 0
+}
+
 # tunnel_update [withdraw]: give netifd the routes and the DNS server, or (withdraw)
 # take them back: the tunnel is not trusted any more
 tunnel_update() {
@@ -3445,7 +3507,7 @@ tunnel_update() {
     fi
     for TUD in $TUDNS; do
       [ "$TUMODE" = 'none' ] && break
-      [ "$TUMODE" = 'full' ] || proto_add_ipv4_route "$TUD" 32
+      [ "$(dns_owner "$TUD" "$PIAWG_IF")" = "$PIAWG_IF" ] && proto_add_ipv4_route "$TUD" 32
       proto_add_dns_server "$TUD"
     done
     proto_send_update "$PIAWG_IF"
@@ -3466,8 +3528,12 @@ tunnel_handshake() {
 # Does the PIA DNS server answer through the tunnel? (host routes first)
 tunnel_dns_probe() {
   for TDD in $(dns_hosts); do
-    ip route replace "$TDD/32" dev "$PIAWG_IF" 2>/dev/null
-    nslookup -timeout=3 privateinternetaccess.com "$TDD" >/dev/null 2>&1 && return 0
+    # a metric 0 host route for the probe only: it goes first whichever tunnel owns the address
+    ip route replace "$TDD/32" dev "$PIAWG_IF" proto boot metric 0 2>/dev/null
+    TDR=1
+    nslookup -timeout=3 privateinternetaccess.com "$TDD" >/dev/null 2>&1 && TDR=0
+    ip route del "$TDD/32" dev "$PIAWG_IF" proto boot 2>/dev/null
+    [ $TDR -eq 0 ] && return 0
   done
   return 1
 }
@@ -3783,14 +3849,20 @@ confirm_tunnel() {
     echo "Stage 2/2 (withdraw): no recent handshake: default route and DNS server withdrawn" >&3
     history_add confirm withdrawn "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "no recent handshake: routes withdrawn"
     tunnel_update withdraw
+    dns_routes_sync
   fi
   while :; do
     if confirm_check; then
       if tunnel_update; then
+        dns_routes_sync
         if has_default_route "$PIAWG_IF"; then
           echo "Stage 2/2 (apply): default route and DNS server $(dns_hosts | awk '{print $1}') applied" >&3
         else
-          echo "Stage 2/2 (apply): DNS server $(dns_hosts | awk '{print $1}') and its route applied" >&3
+          if [ "$(dns_owner "$(dns_hosts | awk '{print $1}')" "$PIAWG_IF")" = "$PIAWG_IF" ]; then
+            echo "Stage 2/2 (apply): DNS server $(dns_hosts | awk '{print $1}') and its route applied" >&3
+          else
+            echo "Stage 2/2 (apply): DNS server $(dns_hosts | awk '{print $1}') applied (reached through the tunnel with the default route)" >&3
+          fi
         fi
         rm -f "$RUNDIR/confirm.fail.$PIAWG_IF" "$RUNDIR/confirm.cnt.$PIAWG_IF" "$RUNDIR/failover.tried.$PIAWG_IF"
         rot_clear
@@ -4143,7 +4215,12 @@ hook_cmd() {
   case "$1" in
   ifup) ;;
   ifdown | ifupdate)
-    wan_changed "$1" "$2"
+    # a PIA tunnel went down: the DNS addresses it owned go to another
+    if iface_exists "$2"; then
+      [ "$1" = 'ifdown' ] && dns_routes_sync
+    else
+      wan_changed "$1" "$2"
+    fi
     return 0
     ;;
   *) return 0 ;;
@@ -5500,6 +5577,7 @@ case "$1" in
     exit 1
     ;;
   esac ;;
+'dns-routes') dns_routes_sync ;;
 'update') script_update "$2" ;;
 'version') echo "Version is ${CURVERS}" ;;
 '') print_usage ;;

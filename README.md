@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.19.1 (upstream 1.0.16)
+1.19.2 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -189,6 +189,8 @@ The Interfaces table has three columns like Network > Interfaces: the interface 
 Since 1.17.14, a masquerading zone whose network uses a PIA DNS address (10.0.0.241 to 10.0.0.244, e.g. a PIA OpenVPN tunnel set up by hand) is not counted as a WAN zone: the kill switch does not offer it and no leak warning names it.
 
 Since 1.18.0, the Account section of the LuCI page has a Version Status row: green when this is the newest `pia_wg.sh` on the `release` branch, amber `X → Y available` when a newer one exists. The newest version is read (first 2 KB of the script) by `cache refresh` (cron every 6 hours and the Refresh button) and kept as `latest.version` in the cache folder; the page itself makes no request to GitHub. The row sits under the page description; its Update now button (enabled when a newer version exists) runs `pia.sh update --yes`: the script is downloaded and checked like `pia.sh update` does, the old one is kept as `pia.sh.prev` in the cache folder, then the LuCI app is installed (rpcd, and with it the LuCI login, is restarted only when its plugin or ACL changed) and the renew job refreshed. No interface is restarted.
+
+Since 1.19.2, the host route to a PIA DNS server (the same address, e.g. 10.0.0.242, on every tunnel using Standard DNS) belongs to one tunnel: the only one using that address, or of several the one with the default route (else the first in the config). Before, every tunnel without the default route took the address for itself, so traffic meant for the default tunnel (dqm's probe of its DNS server) left through it and woke it up, which kept the handshakes of tunnels with keepalive 0 renewing. The routes follow the tunnels as they go up and down (`pia.sh dns-routes` does it, and the ifdown hook); the stage-1 probe route is removed after the probe.
 
 ### Regions needing the legacy token
 
