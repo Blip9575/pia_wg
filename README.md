@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.19.4 (upstream 1.0.16)
+1.19.5 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -97,7 +97,7 @@ Then, next time you use `./pia_wg.sh start` (if not already started, otherwise y
 ## Choosing a region
 `configure region` also asks `Pick the fastest region of that country at each start? (y/N)`. With yes (`region_fast`), each `start` pings (ICMP, through the WAN, in parallel) the online regions of the same country and kind (same streaming/geo/port-forward flags) and uses the fastest; the region is written to the config only when it changes. `renew` keeps the current one.
 
-In LuCI, a new interface has Fastest region ticked (the Region Selection row is hidden while it is), and its name is chosen from a drop-down: `pia_<country code>` (`pia_gb`, numbered when taken; `pia_cc` until a location is chosen) or Custom. In LuCI the Region Selection list shows the ping time of each region of the chosen country in brackets (`UK London (23 ms)`, `(–)` when there is no answer): measured on request through the WAN with `pia.sh api ping-regions PROTOCOL ID…`, never stored.
+In LuCI, a new interface has Fastest region ticked (the Region Selection row is hidden while it is), and its name is chosen from a drop-down: `pia_<country code>` (the default: `pia_gb`, numbered when taken as `pia_gb_2`; `pia_cc` until a location is chosen), `pia_wg_<country code>`, `vpn_pia_<country code>` or Custom. In LuCI the Region Selection list shows the ping time of each region of the chosen country in brackets (`UK London (23 ms)`, `(–)` when there is no answer): measured on request through the WAN with `pia.sh api ping-regions PROTOCOL ID…`, never stored.
 
 `./pia_wg.sh configure region` lets you type a region ID, or pick from a numbered list that can be narrowed with yes/no questions. Pressing enter gives the default, which is shown in capitals, e.g. `(y/N)`:
   - `Port forward only servers? (y/N)`: only regions supporting port forwarding

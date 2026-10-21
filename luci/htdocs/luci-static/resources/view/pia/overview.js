@@ -675,36 +675,36 @@ return view.extend({
 		const nameInp = E('input', { 'class': 'cbi-input-text', 'type': 'text', 'value': '',
 			'maxlength': 15, 'placeholder': 'pia_cc', 'spellcheck': 'false', 'style': 'margin-top:.4em', 'input': () => { nameTouched = true; } });
 		let nameTouched = false, nameUpdate = null;
-		// pia_<country code>, numbered when taken (pia_gb_2)
-		const countryName_ = () => {
+		// <prefix><country code>, numbered when taken (pia_gb_2); the patterns in alphabetical order
+		const NAME_PATTERNS = [ [ 'country', 'pia_' ], [ 'wg', 'pia_wg_' ], [ 'vpn', 'vpn_pia_' ] ];
+		const countryName_ = (prefix) => {
 			const c = picker && picker.state.country ? picker.state.country.toLowerCase() : '';
 			if (!c) return '';
-			let n = 'pia_' + c, k = 2;
-			while (taken(n) && k < 100) n = 'pia_' + c + '_' + (k++);
+			const pre = prefix || 'pia_';
+			let n = pre + c, k = 2;
+			while (taken(n) && k < 100) n = pre + c + '_' + (k++);
 			return n.slice(0, 15);
 		};
 		const nameSel = E('select', { 'class': 'cbi-input-select', 'change': () => nameUpdate(true) });
 		const nameHelp = E('div');
 		const nameBox = E('div', [ nameSel, nameInp ]);
 		nameUpdate = pick => {
-			const cn = countryName_(), prev = nameSel.value;
-			const opts = [
-				[ 'country', cn || 'pia_cc', false ],
-				[ 'custom', _('Custom'), false ]
-			];
+			const prev = nameSel.value;
+			const opts = NAME_PATTERNS.map(pt => [ pt[0], countryName_(pt[1]) || pt[1] + 'cc', false ]).concat([ [ 'custom', _('Custom'), false ] ]);
 			dom.content(nameSel, opts.map(o => E('option', { 'value': o[0], 'disabled': o[2] ? '' : null }, o[1])));
 			const v = prev || 'country';
 			nameSel.value = v;
 			if (v == 'custom') {
 				nameInp.style.display = '';
-				if (!nameTouched && cn) nameInp.value = cn;
+				if (!nameTouched && countryName_()) nameInp.value = countryName_();
 			}
 			else
 				nameInp.style.display = 'none';
 			dom.content(nameHelp, v == 'custom' ? _('Name for interface and firewall zone. Letters, digits and underscore (up to 15)')
 				: _('Country code automatically generated based on VPN location'));
 		};
-		const chosenName = () => nameSel.value == 'country' ? countryName_() : nameInp.value.trim();
+		const chosenName = () => nameSel.value == 'custom' ? nameInp.value.trim()
+			: countryName_((NAME_PATTERNS.find(pt => pt[0] == nameSel.value) || NAME_PATTERNS[0])[1]);
 		const nameOk = n => /^[A-Za-z0-9_]{1,15}$/.test(n) && [ 'account', 'apitoken', 'vpntoken', 'cache', 'log' ].indexOf(n) < 0;
 
 		let picker = null;
@@ -794,7 +794,7 @@ return view.extend({
 			const g = picker ? picker.get() : null;
 			let name = adding ? chosenName() : i.name;
 			if (adding) {
-				if (!name && nameSel.value == 'country') return problem(_('Select a VPN location'));
+				if (!name && nameSel.value != 'custom') return problem(_('Select a VPN location'));
 				if (!nameOk(name)) return problem(_('Invalid name: 1 to 15 letters, digits or underscore'));
 				if (others.some(o => o.name == name)) return problem(_('An interface with that name exists'));
 			}
