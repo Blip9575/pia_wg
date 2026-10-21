@@ -113,7 +113,7 @@ const methods = {
 		}
 	},
 
-	// login | refresh_list | refresh_cache | update (a background job)
+	// login | refresh_list | refresh_cache | update | check_version (a background job)
 	global_action: {
 		args: { op: 'op' },
 		call: function(request) {
@@ -121,7 +121,8 @@ const methods = {
 				login: [ 'api', 'login' ],
 				refresh_list: [ 'api', 'refresh-list' ],
 				refresh_cache: [ 'cache', 'refresh' ],
-				update: [ 'update', '--yes' ]
+				update: [ 'update', '--yes' ],
+				check_version: [ 'version', 'check' ]
 			}[request.args.op];
 			if (!cmd)
 				return { ok: false, error: 'Unknown action' };

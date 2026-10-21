@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.19.6
+# Version: 1.19.7
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -1547,8 +1547,15 @@ fw_zone_names() {
 fw_zone_is_vpn() {
   FVZ="$(fw_zone_id "$1")"
   for FVN in $(uci -q get "firewall.$FVZ.network"); do
-    case "$(uci -q get "network.$FVN.proto")" in
-    wireguard | amneziawg | openvpn | vpn) return 0 ;;
+    FVP="$(uci -q get "network.$FVN.proto")"
+    case "$FVP" in
+    wireguard | amneziawg | openvpn | vpn | pptp | l2tp | sstp | ipsec | zerotier | nebula) return 0 ;;
+    none)
+      # a tunnel made by hand: protocol none on a tunnel device
+      case "$(uci -q get "network.$FVN.device")" in
+      tun* | tap* | wg* | awg* | ipsec*) return 0 ;;
+      esac
+      ;;
     esac
   done
   return 1
@@ -1589,11 +1596,11 @@ fw_lan_zone() {
 }
 
 # The WAN zones: attached to br-wan or masquerading, no VPN protocol (and not br-lan)
-# Does a network of the zone exist? (a zone left behind by a removed interface has none)
+# Does an enabled network of the zone exist? (a zone left behind by a removed interface has none; a disabled network carries nothing)
 fw_zone_has_net() {
   FHZ="$(fw_zone_id "$1")"
   for FHN in $(uci -q get "firewall.$FHZ.network"); do
-    [ "$(uci -q get "network.$FHN")" = 'interface' ] && return 0
+    [ "$(uci -q get "network.$FHN")" = 'interface' ] && [ "$(uci -q get "network.$FHN.disabled")" != '1' ] && return 0
   done
   return 1
 }
@@ -4737,7 +4744,7 @@ api_job() {
   *) valid_ifname "$AJK" || api_fail "Invalid interface name" ;;
   esac
   case "$*" in
-  "-i $AJK start" | "-i $AJK restart" | "-i $AJK stop" | "-i $AJK renew --force" | 'cache refresh' | 'api refresh-list' | 'api login' | 'update --yes') ;;
+  "-i $AJK start" | "-i $AJK restart" | "-i $AJK stop" | "-i $AJK renew --force" | 'cache refresh' | 'api refresh-list' | 'api login' | 'update --yes' | 'version check') ;;
   'cache probe '[A-Z][A-Z]) [ "$AJK" = '_probe' ] || api_fail "Command not allowed" ;;
   *) api_fail "Command not allowed" ;;
   esac
@@ -5592,7 +5599,18 @@ case "$1" in
   esac ;;
 'dns-routes') dns_routes_sync ;;
 'update') script_update "$2" ;;
-'version') echo "Version is ${CURVERS}" ;;
+'version') case "$2" in
+  check)
+    pia_wan
+    if version_check; then
+      echo "Newest version on GitHub is $VCV (this is $CURVERS)"
+    else
+      echo "The newest version could not be read (GitHub not reachable)" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "Version is ${CURVERS}" ;;
+  esac ;;
 '') print_usage ;;
 *)
   echo "Unknown command '$*'!" >&2

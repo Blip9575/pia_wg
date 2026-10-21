@@ -367,7 +367,11 @@ return view.extend({
 		};
 		return E('div', { 'class': 'cbi-section' }, [
 			row(_('Version Status'), status),
-			row('', E('button', { 'class': 'cbi-button cbi-button-action', 'disabled': older ? null : '', 'click': ui.createHandlerFn(this, update) }, _('Update now')))
+			row('', E('button', {
+				'class': 'cbi-button cbi-button-action',
+				'click': ui.createHandlerFn(this, () => this.runJob(_('Checking for updates'), '_global', () => callGlobal('check_version')))
+			}, _('Check now')), ' ',
+			E('button', { 'class': 'cbi-button cbi-button-action', 'style': 'margin-left:.5em', 'disabled': older ? null : '', 'click': ui.createHandlerFn(this, update) }, _('Update now')))
 		]);
 	},
 
