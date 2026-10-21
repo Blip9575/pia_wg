@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.19.2 (upstream 1.0.16)
+1.19.3 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -232,10 +232,14 @@ The commands that act on the tunnel, the tokens or the cache (`start`, `restart`
 
 A tunnel gets the default route and its DNS server only when it works, so that a key PIA does not know, or a server that does not answer, can no longer leave a default route that goes nowhere:
 
-1. **Stage 1 (confirm):** the interface comes up with its key but without routes or DNS (the network config has no `dns` and no `route_allowed_ips`; the allowed IPs are always everything). The script waits for the handshake (up to 15 s) and sends a DNS query to the PIA DNS server through the tunnel, over a host route made first so that it cannot leave through the WAN.
-2. **Stage 2 (apply):** the default route (or, for an interface without it, only the DNS route) and the DNS server are given to netifd as an update of the interface, the way the protocol script would. Nothing of it is written to the flash, and an interface that is restarted starts again from stage 1 (the ifup hook confirms it again).
+1. **Stage 1 (confirm):** the interface comes up with its key but without routes or DNS (the network config has no `dns` and no `route_allowed_ips`; the allowed IPs are always everything). The script waits for the handshake (up to 15 s).
+2. **Stage 2 (apply):** a temporary host route to the PIA DNS server is set through the tunnel, so that the query cannot leave through the WAN (and, since 1.19.2, does not take the address from the tunnel that owns it).
+3. **Stage 3 (confirm):** a DNS query is sent to the DNS server through the tunnel.
+4. **Stage 4 (apply):** the default route (or, for an interface without it, only the route to the DNS server) and the DNS server are given to netifd as an update of the interface, the way the protocol script would. Nothing of it is written to the flash, and an interface that is restarted starts again from stage 1 (the ifup hook confirms it again).
 
-When stage 1 fails the script recovers up to three times: it registers the key again, then refreshes the servers list and chooses another server, then renews the VPN token (a list refresh or a token renewal at most once in 10 minutes). When it still fails the tunnel stays up and unconfirmed, the WAN keeps the default route, and the next hook or cron run tries again. A confirmed tunnel whose handshake is lost has its default route and DNS server withdrawn at the next hook or renew. Every stage is logged (`Stage 1/2 (confirm)`, `Stage 2/2 (apply)`, `Stage 2/2 (withdraw)`), to the PIA log and to the system log. `pia.sh confirm [--force]` runs it by hand.
+The log names the DNS server as the DNS servers drop-down does, e.g. `Stage 3/4 (confirm): PIA with MACE (10.0.0.244) answered`.
+
+When stage 1 or 3 fails the script recovers up to three times: it registers the key again, then refreshes the servers list and chooses another server, then renews the VPN token (a list refresh or a token renewal at most once in 10 minutes). When it still fails the tunnel stays up and unconfirmed, the WAN keeps the default route, and the next hook or cron run tries again. A confirmed tunnel whose handshake is lost has its default route and DNS server withdrawn at the next hook or renew. Every stage is logged (`Stage 1/4 (confirm)` to `Stage 4/4 (apply)`, `Stage 4/4 (withdraw)`), to the PIA log and to the system log. `pia.sh confirm [--force]` runs it by hand.
 
 ## Guard (since 1.8.0)
 
