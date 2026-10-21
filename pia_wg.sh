@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.19.7
+# Version: 1.19.8
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -4332,9 +4332,8 @@ script_update() {
   echo "Upgrading from version $CURVERS to version $NEWVERS"
   # the old script is kept in the cache folder (one copy) to go back by hand
   cp -p "$SCRIPTPATH" "$(cache_dir)/pia.sh.prev" 2>/dev/null && echo "The previous script is kept as $(cache_dir)/pia.sh.prev"
-  chmod +x "$TMPDL"
+  chmod 755 "$TMPDL"
   mv "$TMPDL" "$SCRIPTPATH"
-  chmod +x "$SCRIPTPATH"
   if [ "$1" = '--yes' ]; then
     # the new script finishes the job: the LuCI app (if installed) and the jobs
     if [ -f /www/luci-static/resources/view/pia/overview.js ]; then
@@ -4416,6 +4415,8 @@ luci_install() {
     /usr/share/rpcd/*) cmp -s "$LITMP/new" "$LIDST" || LIRPCD='' ;;
     esac
     cp "$LITMP/new" "$LIDST"
+    # (the web server serves only files that others may read; the job runs with umask 077)
+    chmod 644 "$LIDST"
   done
   rm -rf "$LITMP"
   backup_add luci
