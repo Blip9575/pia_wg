@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.19.0
+# Version: 1.19.1
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -5063,9 +5063,10 @@ api_cmd() {
 # configured it is implicit
 SELIF=''
 # -i may also follow the command (restart -i NAME): moved to the front
+# (not for api: "api job NAME -i NAME start" is matched whole)
 case " $* " in
 *' -i '*)
-  if [ "$1" != '-i' ]; then
+  if [ "$1" != '-i' ] && [ "$1" != 'api' ]; then
     SELN=$#
     SELFOUND=''
     SELSKIP=''
