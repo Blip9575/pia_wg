@@ -378,14 +378,6 @@ return view.extend({
 		return E('div', [ E('strong', label + ': '), value ]);
 	},
 
-	stateLines: function(i) {
-		if (i.job && i.job.state == 'running')
-			return [ E('div', { 'class': 'spinning' }, _('Working…')) ];
-		if (!i.up)
-			return [];
-		return [];
-	},
-
 	settingsLines: function(i) {
 		const warn = [], st = this.st;
 		const yes = _('Yes'), no = _('No'), off = _('Off');
@@ -394,7 +386,6 @@ return view.extend({
 		const ka = i.keepalive == null ? KEEPALIVE : i.keepalive;
 		const ksw = i.killswitch, pf = i.portfwd;
 		const L2 = [].concat(
-			this.stateLines(i),
 			this.line(_('Keepalive'), ka == KEEPALIVE ? _('Default') : ka == 0 ? _('Disabled') : _('Custom')),
 			this.line(_('Default route'), i.default_route ? yes : no),
 			this.line(_('DNS'), dnsLabel(i)),
