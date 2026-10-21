@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.17.14 (upstream 1.0.16)
+1.18.0 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -187,6 +187,8 @@ Since 1.17.12, `-i NAME` may also follow the command (`pia.sh restart -i NAME`);
 The Interfaces table has three columns like Network > Interfaces: the interface box (name and handshake), the status lines, the buttons.
 
 Since 1.17.14, a masquerading zone whose network uses a PIA DNS address (10.0.0.241 to 10.0.0.244, e.g. a PIA OpenVPN tunnel set up by hand) is not counted as a WAN zone: the kill switch does not offer it and no leak warning names it.
+
+Since 1.18.0, the Account section of the LuCI page has a Version Status row: green when this is the newest `pia_wg.sh` on the `release` branch, amber `X → Y available` when a newer one exists. The newest version is read (first 2 KB of the script) by `cache refresh` (cron every 6 hours and the Refresh button) and kept as `latest.version` in the cache folder; the page itself makes no request to GitHub. Nothing is installed by it: `pia.sh update` is still run by hand.
 
 ### Regions needing the legacy token
 

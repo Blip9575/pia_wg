@@ -98,6 +98,16 @@ function pad2(n) {
 }
 
 // seconds since the epoch -> 2026/10/13 and 20:27:55, in UTC
+// -1, 0, 1: version a older, equal, newer than b (numeric parts)
+function cmpVersion(a, b) {
+	const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+	for (let k = 0; k < Math.max(x.length, y.length); k++) {
+		const d = (x[k] || 0) - (y[k] || 0);
+		if (d) return d < 0 ? -1 : 1;
+	}
+	return 0;
+}
+
 function utcDate(t) {
 	const d = new Date(t * 1000);
 	return '%d/%s/%s'.format(d.getUTCFullYear(), pad2(d.getUTCMonth() + 1), pad2(d.getUTCDate()));
@@ -254,6 +264,16 @@ return view.extend({
 				? (days => days == 1 ? _('(1 day)') : _('(%d days)').format(days))(Math.floor((acc.vpn_expires - st.now) / 86400))
 				: _('(expired: log in again)'));
 
+		// green when this is the newest version on GitHub, amber when a newer one exists
+		let versionStatus = E('span', _('%s (not checked)').format(st.version));
+		if (st.version_latest) {
+			const older = cmpVersion(st.version, st.version_latest) < 0;
+			versionStatus = E('span', {
+				'style': 'color:var(--' + (older ? 'warn' : 'success') + '-color-high,' + (older ? '#d97706' : '#2ea44f') + ')',
+				'title': st.version_checked ? _('Checked %s UTC').format(utcDate(st.version_checked) + ' ' + utcTime(st.version_checked)) : ''
+			}, older ? _('%s → %s available').format(st.version, st.version_latest) : _('%s (up to date)').format(st.version));
+		}
+
 		const cacheLine = c.regions
 			? '%s (%d regions · %d meta servers)'.format(when ? utcDate(when) + ' ' + utcTime(when) + ' UTC' : _('never'), c.regions, c.meta || 0)
 			: _('No servers list yet');
@@ -314,7 +334,8 @@ return view.extend({
 			row('', E('button', {
 					'class': 'cbi-button cbi-button-action',
 					'click': ui.createHandlerFn(this, () => this.runJob(_('Refreshing the server list & VPN token'), '_global', () => callGlobal('refresh_cache')))
-				}, _('Refresh server list & VPN token')))
+				}, _('Refresh server list & VPN token'))),
+			row(_('Version Status'), versionStatus)
 		]);
 	},
 
@@ -935,7 +956,7 @@ return view.extend({
 		this.accountBox = E('div', {}, [ this.renderAccount() ]);
 		const page = E('div', {}, [
 			E('h2', _('PIA VPN')),
-			E('div', { 'class': 'cbi-map-descr' }, _('Private Internet Access over WireGuard and AmneziaWG (pia.sh %s).').format(st.version)),
+			E('div', { 'class': 'cbi-map-descr' }, _('Private Internet Access over WireGuard and AmneziaWG.')),
 			this.accountBox,
 			this.renderInterfaces(),
 			this.renderLog(),

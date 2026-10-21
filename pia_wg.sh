@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.17.14
+# Version: 1.18.0
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -614,6 +614,20 @@ token_days() {
   fi
 }
 
+# The newest script version on GitHub (the first 2 KB of pia_wg.sh), kept with the
+# time of the check in latest.version in the cache folder; a failed check keeps the old one
+version_check() {
+  VCV="$(curl -sf --max-time 15 --range 0-2047 ${WANDEV:+--interface "if!$WANDEV"} "$SCRIPTDL" 2>/dev/null |
+    awk '(index($0,"# Version: ")==1){print $3; exit}')"
+  case "$VCV" in
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *) return 1 ;;
+  esac
+  VCF="$(cache_dir)/latest.version"
+  echo "$VCV $(date +%s)" >"$VCF.tmp" && mv "$VCF.tmp" "$VCF"
+  return 0
+}
+
 cache_refresh() {
   RSTART="$(date +%s)"
   R=0
@@ -634,6 +648,11 @@ cache_refresh() {
   else
     echo "  Meta servers : NONE reachable, keeping the cached ones" >&3
     R=1
+  fi
+  if version_check; then
+    echo "  Script       : newest version on GitHub is $VCV (this is $CURVERS)" >&3
+  else
+    echo "  Script       : newest version not checked (GitHub not reachable)" >&3
   fi
   # Renew PIA tokens ahead of expiry
   if uci -q get pia.account >/dev/null; then
@@ -4480,7 +4499,7 @@ api_status() {
   done
   {
     for AX in $(iface_list); do api_iface_json "$AX"; done
-  } | jq -sc --arg version "$CURVERS" --argjson awg "$AAWG" --argjson strict "$ASTRICT" \
+  } | jq -sc --arg version "$CURVERS" --arg vlatest "$(cut -d' ' -f1 "$ACD/latest.version" 2>/dev/null)" --arg vchecked "$(cut -d' ' -f2 "$ACD/latest.version" 2>/dev/null)" --argjson awg "$AAWG" --argjson strict "$ASTRICT" \
     --arg id "$(uci -q get pia.account.id)" --arg pw "$(uci -q get pia.account.password)" \
     --arg apiexp "$(uci -q get pia.apitoken.expires)" --arg vpnexp "$(uci -q get pia.vpntoken.expires)" \
     --arg zones "$AZONES" --arg lan "$(fw_lan_zone)" --arg wans "$(fw_wan_zones | tr '\n' ' ')" --argjson hook "$([ -x "$HOOKFILE" ] && echo true || echo false)" --arg vpns "$(fw_vpn_zones | tr '\n' ' ')" --arg brwans "$(fw_zone_of_dev br-wan | tr '\n' ' ')" --arg masqs "$(fw_masq_zones | tr '\n' ' ')" --arg stdmtu "$(std_mtu)" \
@@ -4489,7 +4508,7 @@ api_status() {
     --argjson regions "${ASN:-0}" --arg listts "${ASTS:-0}" --arg checked "${ASCK:-0}" \
     --arg cdir "$ACD" --arg cpath "$(uci -q get pia.cache.dir || echo "$CACHEDEFDIR")" --argjson cram "$ARAM" --argjson ccron "$ACRON" --arg cmeta "${AMETA:-0}" \
     --argjson job "$(api_job_json _global)" --argjson probe "$(api_job_json _probe)" \
-    '{version: $version, awg: ($awg == 1), strict_dns: ($strict == 1),
+    '{version: $version, version_latest: (if $vlatest == "" then null else $vlatest end), version_checked: ($vchecked | tonumber? // null), awg: ($awg == 1), strict_dns: ($strict == 1),
       account: {id: $id, password_set: ($pw != ""), api_expires: ($apiexp | tonumber? // null), vpn_expires: ($vpnexp | tonumber? // null)},
       zones: ($zones | split(" ") | map(select(. != ""))), lan_zone: $lan, hook: $hook, wan_zones: ($wans | split(" ") | map(select(. != ""))), vpn_zones: ($vpns | split(" ") | map(select(. != ""))), brwan_zones: ($brwans | split(" ") | map(select(. != ""))), masq_zones: ($masqs | split(" ") | map(select(. != ""))),
       std_mtu: ($stdmtu | tonumber), small_mtu: ($small | tonumber), max_mtu: ($max | tonumber),
