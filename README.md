@@ -9,7 +9,7 @@ __This is a fork__ (branch `release`) of [bolemo/pia_wg](https://github.com/bole
   - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 
 ## Version
-1.19.8 (upstream 1.0.16)
+1.19.10 (upstream 1.0.16)
 
 Changes compared to upstream 1.0.16:
   - Logs in to PIA the way the official PIA apps do (API v5 tokens that last weeks, through PIA's own servers by IP address), so it works where the PIA domain names are blocked; the legacy token is used for the servers that still require it
@@ -190,7 +190,7 @@ Since 1.17.14, a masquerading zone whose network uses a PIA DNS address (10.0.0.
 
 Since 1.18.0, the Account section of the LuCI page has a Version Status row: green when this is the newest `pia_wg.sh` on the `release` branch, amber `X → Y available` when a newer one exists. The newest version is read (first 2 KB of the script) by `cache refresh` (cron every 6 hours and the Refresh button) and kept as `latest.version` in the cache folder; the page itself makes no request to GitHub. The row sits under the page description; its Update now button (enabled when a newer version exists) runs `pia.sh update --yes`: the script is downloaded and checked like `pia.sh update` does, the old one is kept as `pia.sh.prev` in the cache folder, then the LuCI app is installed (rpcd, and with it the LuCI login, is restarted only when its plugin or ACL changed) and the renew job refreshed. No interface is restarted.
 
-Since 1.19.2, the host route to a PIA DNS server (the same address, e.g. 10.0.0.242, on every tunnel using Standard DNS) belongs to one tunnel: the only one using that address, or of several the one with the default route (else the first in the config). Before, every tunnel without the default route took the address for itself, so traffic meant for the default tunnel (dqm's probe of its DNS server) left through it and woke it up, which kept the handshakes of tunnels with keepalive 0 renewing. The routes follow the tunnels as they go up and down (`pia.sh dns-routes` does it, and the ifdown hook); the stage-1 probe route is removed after the probe.
+Since 1.19.2, the host route to a PIA DNS server (the same address, e.g. 10.0.0.242, on every tunnel using Standard DNS) belongs to one tunnel: the only one using that address, or of several the one with the default route (else the first in the config). Before, every tunnel without the default route took the address for itself, so traffic meant for the default tunnel (dqm's probe of its DNS server) left through it and woke it up, which kept the handshakes of tunnels with keepalive 0 renewing. The routes follow the tunnels as they go up and down (`pia.sh dns-routes` does it, and the ifdown hook); the stage-3 probe route is removed after the probe.
 
 Since 1.19.7, a zone is never a WAN zone (kill switch choices, leak warnings) when one of its networks has a VPN protocol (wireguard, amneziawg, openvpn, vpn, pptp, l2tp, sstp, ipsec, zerotier, nebula), is protocol none on a tunnel device (tun*, tap*, wg*, awg*, ipsec*) or is disabled. The Version Status row has a Check now button next to Update now (`pia.sh version check`: reads the newest version from GitHub at once).
 
@@ -234,14 +234,15 @@ The commands that act on the tunnel, the tokens or the cache (`start`, `restart`
 
 A tunnel gets the default route and its DNS server only when it works, so that a key PIA does not know, or a server that does not answer, can no longer leave a default route that goes nowhere:
 
-1. **Stage 1 (confirm):** the interface comes up with its key but without routes or DNS (the network config has no `dns` and no `route_allowed_ips`; the allowed IPs are always everything). The script waits for the handshake (up to 15 s).
-2. **Stage 2 (apply):** a temporary host route to the PIA DNS server is set through the tunnel, so that the query cannot leave through the WAN (and, since 1.19.2, does not take the address from the tunnel that owns it).
-3. **Stage 3 (confirm):** a DNS query is sent to the DNS server through the tunnel.
-4. **Stage 4 (apply):** the default route (or, for an interface without it, only the route to the DNS server) and the DNS server are given to netifd as an update of the interface, the way the protocol script would. Nothing of it is written to the flash, and an interface that is restarted starts again from stage 1 (the ifup hook confirms it again).
+1. **Stage 1 (confirm):** the interface comes up with its key but without routes or DNS (the network config has no `dns` and no `route_allowed_ips`; the allowed IPs are always everything). A ping bound to the tunnel (`ping -I`, so it needs no route) is sent to a PIA-only address (10.0.0.242, else 10.0.0.243) until it is answered (up to 15 s). The reply shows that the VPN carries traffic, whichever DNS server the interface uses. The first packets also start the handshake.
+2. **Stage 2 (confirm):** the WireGuard handshake is recent (the health of the tunnel).
+3. **Stage 3 (apply):** a temporary host route to the DNS server (PIA's or the Custom one) is set through the tunnel, so that the query cannot leave through the WAN (and, since 1.19.2, does not take the address from the tunnel that owns it). A Custom DNS server is always reached through the VPN, so its queries cannot leak.
+4. **Stage 4 (confirm):** a DNS query is sent to the DNS server through the tunnel; the temporary route is removed afterwards.
+5. **Stage 5 (apply):** the default route (or, for an interface without it, only the route to the DNS server) and the DNS server are given to netifd as an update of the interface, the way the protocol script would. Nothing of it is written to the flash, and an interface that is restarted starts again from stage 1 (the ifup hook confirms it again).
 
-The log names the DNS server as the DNS servers drop-down does, e.g. `Stage 3/4 (confirm): PIA with MACE (10.0.0.244) answered`.
+The log names the DNS server as the DNS servers drop-down does, e.g. `Stage 4/5 (confirm): PIA with MACE (10.0.0.244) answered`.
 
-When stage 1 or 3 fails the script recovers up to three times: it registers the key again, then refreshes the servers list and chooses another server, then renews the VPN token (a list refresh or a token renewal at most once in 10 minutes). When it still fails the tunnel stays up and unconfirmed, the WAN keeps the default route, and the next hook or cron run tries again. A confirmed tunnel whose handshake is lost has its default route and DNS server withdrawn at the next hook or renew. Every stage is logged (`Stage 1/4 (confirm)` to `Stage 4/4 (apply)`, `Stage 4/4 (withdraw)`), to the PIA log and to the system log. `pia.sh confirm [--force]` runs it by hand.
+When stage 1, 2 or 4 fails the script recovers up to three times: it registers the key again, then refreshes the servers list and chooses another server, then renews the VPN token (a list refresh or a token renewal at most once in 10 minutes). When it still fails the tunnel stays up and unconfirmed, the WAN keeps the default route, and the next hook or cron run tries again. A confirmed tunnel whose handshake is lost has its default route and DNS server withdrawn at the next hook or renew. Every stage is logged (`Stage 1/5 (confirm)` to `Stage 5/5 (apply)`, `Stage 5/5 (withdraw)`), to the PIA log and to the system log. `pia.sh confirm [--force]` runs it by hand.
 
 ## Guard (since 1.8.0)
 

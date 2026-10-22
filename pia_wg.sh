@@ -7,7 +7,7 @@
 # - This thread: https://forum.openwrt.org/t/private-internet-access-pia-wireguard-vpn-on-openwrt/155475
 # - And @Lazerdog's script: https://github.com/jimhall718/piawg/blob/main/piawgx.sh
 #
-# Version: 1.19.8
+# Version: 1.19.10
 #
 # ©2026 bOLEMO
 # https://github.com/bolemo/pia_wg/
@@ -3557,6 +3557,16 @@ tunnel_dns_probe() {
   return 1
 }
 
+# One ping out of the tunnel to a PIA address (bound to the interface: no route needed).
+# Only PIA's own addresses are used: the reply proves the VPN carries traffic whichever DNS
+# server the interface has. The first packets also start the handshake.
+tunnel_ping() {
+  for TPD in $PIA_DNS $PIA_DNS_SO; do
+    ping -c 1 -W 1 -I "$PIAWG_IF" "$TPD" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 # Has stage 2 been done: handshake, DNS server and (if it has it) the default route
 confirm_done() {
   tunnel_handshake || return 1
@@ -3577,23 +3587,32 @@ confirm_check() {
     return 1
   fi
   CTD0="$(date +%s)"
-  while ! tunnel_handshake; do
+  while ! tunnel_ping; do
     if [ $(($(date +%s) - CTD0)) -ge 15 ]; then
-      CTWHY='no handshake after 15s'
+      CTWHY='PIA did not answer a ping after 15s'
       return 1
     fi
-    # (the query makes the first packets: it starts the handshake)
-    tunnel_dns_probe >/dev/null 2>&1
     sleep 1
   done
-  echo "Stage 1/4 (confirm): handshake confirmed after $(($(date +%s) - CTD0))s" >&3
+  echo "Stage 1/5 (confirm): PIA answered a ping after $(($(date +%s) - CTD0))s (VPN carries traffic)" >&3
+  CTSTG=2
+  CTD0="$(date +%s)"
+  while ! tunnel_handshake; do
+    if [ $(($(date +%s) - CTD0)) -ge 5 ]; then
+      CTWHY='no recent handshake'
+      return 1
+    fi
+    sleep 1
+  done
+  echo "Stage 2/5 (confirm): WireGuard handshake confirmed ($(handshake_age)s ago)" >&3
   CTSTG=3
-  echo "Stage 2/4 (apply): temporary route to $(dns_name) via $PIAWG_IF set" >&3
+  echo "Stage 3/5 (apply): temporary route to $(dns_name) via $PIAWG_IF set" >&3
+  CTSTG=4
   if ! tunnel_dns_probe; then
     CTWHY="$(dns_name) did not answer"
     return 1
   fi
-  echo "Stage 3/4 (confirm): $(dns_name) answered" >&3
+  echo "Stage 4/5 (confirm): $(dns_name) answered" >&3
   return 0
 }
 
@@ -3608,14 +3627,14 @@ confirm_recover() {
   2)
     CRL="$(cat "$RUNDIR/last.list" 2>/dev/null)"
     if [ $((CRNOW - ${CRL:-0})) -ge 600 ]; then
-      echo "Stage ${CTSTG:-1}/4 (confirm): refreshing the servers list (attempt 2/3)" >&3
+      echo "Stage ${CTSTG:-1}/5 (confirm): refreshing the servers list (attempt 2/3)" >&3
       pia_wan
       echo "$CRNOW" >"$RUNDIR/last.list"
-      cache_refresh_list >/dev/null 2>&1 || echo "Stage ${CTSTG:-1}/4 (confirm): the servers list could not be refreshed" >&3
+      cache_refresh_list >/dev/null 2>&1 || echo "Stage ${CTSTG:-1}/5 (confirm): the servers list could not be refreshed" >&3
       PIAREGIONS=''
       fast_region
     else
-      echo "Stage ${CTSTG:-1}/4 (confirm): the servers list was refreshed less than 10 minutes ago; another server is chosen (attempt 2/3)" >&3
+      echo "Stage ${CTSTG:-1}/5 (confirm): the servers list was refreshed less than 10 minutes ago; another server is chosen (attempt 2/3)" >&3
     fi
     # not the server that did not answer
     PIAEXCL="$CROLDEP"
@@ -3624,16 +3643,16 @@ confirm_recover() {
   3)
     CRL="$(cat "$RUNDIR/last.token" 2>/dev/null)"
     if [ $((CRNOW - ${CRL:-0})) -ge 600 ]; then
-      echo "Stage ${CTSTG:-1}/4 (confirm): renewing the VPN token (attempt 3/3)" >&3
+      echo "Stage ${CTSTG:-1}/5 (confirm): renewing the VPN token (attempt 3/3)" >&3
       echo "$CRNOW" >"$RUNDIR/last.token"
       pia_token_forget
     else
-      echo "Stage ${CTSTG:-1}/4 (confirm): the VPN token was renewed less than 10 minutes ago; kept (attempt 3/3)" >&3
+      echo "Stage ${CTSTG:-1}/5 (confirm): the VPN token was renewed less than 10 minutes ago; kept (attempt 3/3)" >&3
     fi
     PIAEXCL="$CROLDEP"
     rot_add "$CROLDEP"
     ;;
-  *) echo "Stage ${CTSTG:-1}/4 (confirm): registering the key again (attempt 1/3)" >&3 ;;
+  *) echo "Stage ${CTSTG:-1}/5 (confirm): registering the key again (attempt 1/3)" >&3 ;;
   esac
   NEWKEY=1
   APPLY=1
@@ -3867,7 +3886,7 @@ confirm_tunnel() {
   # routes that were applied for a tunnel that no longer answers are taken back
   # at once (the WAN default route and its DNS serve meanwhile)
   if ! tunnel_handshake && ip -4 route show default dev "$PIAWG_IF" 2>/dev/null | grep -q .; then
-    echo "Stage 4/4 (withdraw): no recent handshake: default route and route to $(dns_name) withdrawn" >&3
+    echo "Stage 5/5 (withdraw): no recent handshake: default route and route to $(dns_name) withdrawn" >&3
     history_add confirm withdrawn "$(sget "network.$PIAWG_PEER.endpoint_host")" "" "" "no recent handshake: routes withdrawn"
     tunnel_update withdraw
     dns_routes_sync
@@ -3878,11 +3897,11 @@ confirm_tunnel() {
         dns_routes_sync
         CTOWN="$(dns_owner "$(dns_hosts | awk '{print $1}')" "$PIAWG_IF")"
         if [ "$CTOWN" != "$PIAWG_IF" ]; then
-          echo "Stage 4/4 (apply): $(dns_name) reached via $CTOWN (default route tunnel)" >&3
+          echo "Stage 5/5 (apply): $(dns_name) reached via $CTOWN (default route tunnel)" >&3
         elif has_default_route "$PIAWG_IF"; then
-          echo "Stage 4/4 (apply): default route and route to $(dns_name) via $PIAWG_IF set" >&3
+          echo "Stage 5/5 (apply): default route and route to $(dns_name) via $PIAWG_IF set" >&3
         else
-          echo "Stage 4/4 (apply): route to $(dns_name) via $PIAWG_IF set" >&3
+          echo "Stage 5/5 (apply): route to $(dns_name) via $PIAWG_IF set" >&3
         fi
         rm -f "$RUNDIR/confirm.fail.$PIAWG_IF" "$RUNDIR/confirm.cnt.$PIAWG_IF" "$RUNDIR/failover.tried.$PIAWG_IF"
         rot_clear
@@ -3905,12 +3924,12 @@ confirm_tunnel() {
         CTA=0
         continue
       fi
-      echo "Error: Stage ${CTSTG:-1}/4 (confirm) FAILED after 3 attempts (last: $CTWHY): the tunnel stays unconfirmed, the WAN keeps the default route; retried at the next hook or cron" >&3
+      echo "Error: Stage ${CTSTG:-1}/5 (confirm) FAILED after 3 attempts (last: $CTWHY): the tunnel stays unconfirmed, the WAN keeps the default route; retried at the next hook or cron" >&3
       return 1
     fi
-    echo "Stage ${CTSTG:-1}/4 (confirm): FAILED ($CTWHY)" >&3
+    echo "Stage ${CTSTG:-1}/5 (confirm): FAILED ($CTWHY)" >&3
     case $CTA in 1) sleep 5 ;; 2) sleep 15 ;; *) sleep 30 ;; esac
-    confirm_recover "$CTA" || echo "Stage ${CTSTG:-1}/4 (confirm): the key could not be registered" >&3
+    confirm_recover "$CTA" || echo "Stage ${CTSTG:-1}/5 (confirm): the key could not be registered" >&3
   done
 }
 
